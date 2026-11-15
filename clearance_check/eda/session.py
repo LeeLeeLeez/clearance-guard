@@ -274,8 +274,10 @@ class EdaAgentSession:
         try:
             self.server_info = client.start(timeout=self._timeout)
         except Exception as exc:  # noqa: BLE001
+            # 子进程多半是启动后立刻崩了，把它的 stderr 尾部一起带出来便于定位
+            tail = client.stderr_tail.strip()
             client.close()
-            self.last_error = str(exc)
+            self.last_error = f"{exc}\n\n{tail}" if tail else str(exc)
             self.state = ConnectionState.ERROR
             return self.state
 

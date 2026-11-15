@@ -13,8 +13,10 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -265,28 +267,90 @@ def _content_text(result: dict[str, Any]) -> str | None:
 # 服务进程命令探测
 # --------------------------------------------------------------------------
 DEFAULT_AGENT_ROOT = Path(r"E:\AI_model\eda-agent-0.8.1")
+CONFIG_PATH = Path(os.getenv("APPDATA", str(Path.home()))) / "ClearanceGuard" / "agent.json"
 
 _COMMAND_CACHE: dict[tuple[str, str], list[str]] = {}
+
+
+def load_agent_config() -> dict[str, str]:
+    """读取 `%APPDATA%\\ClearanceGuard\\agent.json` 里的 eda-agent 位置。
+
+    支持两种写法（任一即可）：
+        {"python": "D:\\\\venv\\\\Scripts\\\\python.exe"}   直接指定解释器
+        {"agent_root": "D:\\\\eda-agent-0.8.1"}            指定仓库根目录（用其 .venv）
+    """
+    try:
+        # utf-8-sig：兼容记事本 / PowerShell 写入的 BOM
+        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8-sig"))
+    except Exception:  # noqa: BLE001 - 配置缺失或损坏时静默忽略
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        str(key): str(value)
+        for key, value in data.items()
+        if isinstance(value, str) and value.strip()
+    }
+
+
+def _installed_pythons() -> list[str]:
+    """列出本机可能装了 eda-agent 的 Python 解释器（py 启动器 + PATH）。"""
+    found: list[str] = []
+    if os.name == "nt":
+        try:
+            completed = subprocess.run(
+                ["py", "-0p"],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                creationflags=_CREATE_NO_WINDOW,
+            )
+            for line in (completed.stdout or "").splitlines():
+                match = re.search(r"([A-Za-z]:\\.+?pythonw?\.exe)", line)
+                if match:
+                    found.append(match.group(1))
+        except Exception:  # noqa: BLE001 - 没有 py 启动器就跳过
+            pass
+    for name in ("python", "python3"):
+        exe = shutil.which(name)
+        if exe:
+            found.append(exe)
+
+    unique: dict[str, str] = {}
+    for exe in found:
+        # 跳过应用商店的占位别名（WindowsApps\python*.exe），它不是真实解释器
+        if "windowsapps" in exe.lower():
+            continue
+        unique.setdefault(os.path.normcase(exe), exe)
+    return list(unique.values())
 
 
 def find_server_command(agent_root: str | Path | None = None,
                         python_exe: str = "") -> list[str]:
     """找到能运行 eda-agent MCP 服务的命令。
 
-    优先级：显式 python > 环境变量 EDA_AGENT_PYTHON > 仓库 .venv > PATH 上的
-    eda-agent > 当前解释器。
+    优先级：显式 python > 环境变量 EDA_AGENT_PYTHON > 用户配置 agent.json >
+    EDA_AGENT_ROOT 下的 .venv > PATH 上的 eda-agent > 其它已安装的 Python >
+    当前解释器。每个候选都会用 `--version` 验证一次，挑第一个真正能跑的。
     """
-    candidates: list[list[str]] = []
-
-    if python_exe:
-        candidates.append([python_exe, "-m", "eda_agent", "--headless"])
-    env_python = os.environ.get("EDA_AGENT_PYTHON", "").strip()
-    if env_python:
-        candidates.append([env_python, "-m", "eda_agent", "--headless"])
-
-    root = Path(agent_root) if agent_root else Path(
-        os.environ.get("EDA_AGENT_ROOT", DEFAULT_AGENT_ROOT)
+    config = load_agent_config()
+    explicit_python = (
+        python_exe
+        or os.environ.get("EDA_AGENT_PYTHON", "").strip()
+        or config.get("python", "").strip()
     )
+    root_setting = (
+        agent_root
+        or os.environ.get("EDA_AGENT_ROOT", "").strip()
+        or config.get("agent_root", "").strip()
+        or DEFAULT_AGENT_ROOT
+    )
+
+    candidates: list[list[str]] = []
+    if explicit_python:
+        candidates.append([explicit_python, "-m", "eda_agent", "--headless"])
+
+    root = Path(root_setting)
     for rel in (
         r".venv\Scripts\python.exe",
         r"venv\Scripts\python.exe",
@@ -299,9 +363,12 @@ def find_server_command(agent_root: str | Path | None = None,
     if exe:
         candidates.append([exe, "--headless"])
 
-    candidates.append([os.sys.executable, "-m", "eda_agent", "--headless"])
+    for python in _installed_pythons():
+        candidates.append([python, "-m", "eda_agent", "--headless"])
 
-    cache_key = (str(agent_root or DEFAULT_AGENT_ROOT), python_exe)
+    candidates.append([sys.executable, "-m", "eda_agent", "--headless"])
+
+    cache_key = (str(root_setting), explicit_python or sys.executable)
     cached = _COMMAND_CACHE.get(cache_key)
     if cached:
         return list(cached)

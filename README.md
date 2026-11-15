@@ -43,6 +43,18 @@ set EDA_AGENT_ROOT=E:\path\to\eda-agent-0.8.1
 set EDA_AGENT_PYTHON=E:\path\to\eda-agent-0.8.1\.venv\Scripts\python.exe
 ```
 
+也可以写配置文件（不依赖环境变量，双击 `run.cmd` 同样生效）：`%APPDATA%\ClearanceGuard\agent.json`
+
+```json
+{ "python": "D:\\AD_mcp\\online\\.venv-eda-agent\\Scripts\\python.exe" }
+```
+
+或指定仓库根目录：`{ "agent_root": "D:\\eda-agent-0.8.1" }`（会使用其下的 `.venv`）。
+
+启动时会按
+`显式参数 → EDA_AGENT_PYTHON → agent.json → EDA_AGENT_ROOT 下的 .venv → PATH 上的 eda-agent → 其它已安装的 Python → 当前解释器`
+的顺序探测，并逐个用 `eda-agent --version` 验证，选中第一个真正能跑的命令。
+
 ## 启动
 
 **双击 `run.cmd`** 即可。它会自动定位 Python（优先项目内 `.venv`，其次 `PATH` 里的
@@ -454,6 +466,7 @@ python scripts/screenshot.py      # 渲染界面截图到 dev/
 |---|---|
 | 「Altium 脚本未响应」 | 在 Altium 中 File → Run Script… → `Altium_API` → `Dispatcher.pas` → `StartMCPServer`，或让工具自动 `relaunch` |
 | 连接时报「无法启动 EDA Agent」 | 确认 `EDA_AGENT_ROOT` / `EDA_AGENT_PYTHON` 指向带依赖的 eda-agent 虚拟环境 |
+| 连接时报「EDA Agent 服务进程已退出」 | 探测到的 Python 里没有 `eda_agent` 包，错误详情会附上该进程的 stderr；按上面的 `agent.json` / 环境变量指定正确解释器 |
 | 扫描很慢 | 大板读取器件本身要 20~30 s；可先跳过原理图网表；确认 Altium 未被模态对话框阻塞 |
 | 分类结果整板都是原边 | 该板没有隔离变压器 / 光耦，工具按单域处理；可在分类表中把输出侧网络手动改为「副边」，再重新校验 |
 | 违规太多 | 提高「最小缺口」过滤、勾选「只看隔离带」，或调小同类间距 |

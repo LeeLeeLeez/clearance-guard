@@ -729,6 +729,48 @@ class MainWindow(QMainWindow):
 
         return board, report, classifications, note, scan_seconds
 
+    def _make_mounts(self, items: list[dict] | None) -> list[MountPoint]:
+        """把扫描结果里的安装焊盘 dict 转成 MountPoint。"""
+        mounts: list[MountPoint] = []
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            mounts.append(
+                MountPoint(
+                    name=str(item.get("name") or ""),
+                    x=float(item.get("x") or 0.0),
+                    y=float(item.get("y") or 0.0),
+                    width=float(item.get("width") or 4.0),
+                    height=float(item.get("height") or 4.0),
+                    hole=float(item.get("hole") or 0.0),
+                    net=str(item.get("net") or ""),
+                    layer=str(item.get("layer") or "MULTI"),
+                    note=str(item.get("source") or ""),
+                )
+            )
+        return mounts
+
+    def _make_floating_parts(self, items: list[dict] | None) -> list[FloatingPart]:
+        """把扫描结果里的无网络器件 dict 转成 FloatingPart。"""
+        parts: list[FloatingPart] = []
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            parts.append(
+                FloatingPart(
+                    designator=str(item.get("designator") or ""),
+                    comment=str(item.get("comment") or ""),
+                    footprint=str(item.get("footprint") or ""),
+                    x=float(item.get("x") or 0.0),
+                    y=float(item.get("y") or 0.0),
+                    width=float(item.get("width") or 0.0),
+                    height=float(item.get("height") or 0.0),
+                    layer=str(item.get("layer") or "TOP"),
+                    pad_count=int(item.get("pad_count") or 0),
+                )
+            )
+        return parts
+
     def _on_scanned(self, result) -> None:
         board, report, classifications, classify_note, scan_seconds = result
         self._append_log(
@@ -1221,9 +1263,19 @@ class MainWindow(QMainWindow):
         self.progress.setVisible(True)
         self.btn_cancel.setVisible(True)
         self.status_label.setText(busy_text)
+        def deliver(result) -> None:
+            """界面回调里的异常必须显示出来，否则界面看起来像卡死。"""
+            try:
+                on_success(result)
+            except Exception as exc:  # noqa: BLE001 - 统一转成界面提示
+                message = f"界面刷新失败：{exc}"
+                self.status_label.setText(message)
+                self._append_log(message)
+                QMessageBox.warning(self, "操作失败", message)
+
         worker = Worker(fn, self)
         worker.progressed.connect(self._on_progress)
-        worker.succeeded.connect(on_success)
+        worker.succeeded.connect(deliver)
         worker.failed.connect(self._on_failed)
         worker.finished.connect(self._on_worker_finished)
         self._worker = worker
