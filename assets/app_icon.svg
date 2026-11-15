@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0" stop-color="#14507E"/>
+      <stop offset="0.55" stop-color="#0B3B60"/>
+      <stop offset="1" stop-color="#062640"/>
+    </linearGradient>
+    <linearGradient id="bar" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#34D399"/>
+      <stop offset="1" stop-color="#22C55E"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.25" cy="0.15" r="0.75">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect x="0" y="0" width="256" height="256" rx="58" fill="url(#bg)"/>
+  <rect x="0" y="0" width="256" height="256" rx="58" fill="url(#glow)"/>
+
+  <!-- 半透明盾牌弧线（在电极之后，象征审核通过的保护） -->
+  <path d="M166 168 C184 176 202 180 218 180 C216 200 205 214 188 221"
+        stroke="#ffffff" stroke-opacity="0.20" stroke-width="12" fill="none" stroke-linecap="round"/>
+
+  <!-- 两条相对的“电极 / 导线”，中间留出明显空白 -->
+  <rect x="72" y="54" width="24" height="118" rx="11" fill="url(#bar)"/>
+  <rect x="158" y="54" width="24" height="118" rx="11" fill="url(#bar)"/>
+
+  <!-- 中间的避距测量：游标刻度 + 双向箭头 -->
+  <g stroke="#FACC15" stroke-linecap="round" fill="none">
+    <path d="M112 116 H144" stroke-width="6"/>
+    <path d="M119 108 L108 116 L119 124" stroke-width="6"/>
+    <path d="M137 108 L148 116 L137 124" stroke-width="6"/>
+    <path d="M119 90 V100" stroke-width="4" stroke-opacity="0.8"/>
+    <path d="M128 86 V100" stroke-width="4" stroke-opacity="0.8"/>
+    <path d="M137 90 V100" stroke-width="4" stroke-opacity="0.8"/>
+  </g>
+
+  <!-- 右下角白色对勾 -->
+  <path d="M178 190 L192 204 L220 172"
+        stroke="#ffffff" stroke-width="15" fill="none"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

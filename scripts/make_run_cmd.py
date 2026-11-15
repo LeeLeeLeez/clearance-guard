@@ -1,0 +1,91 @@
+"""生成双击启动用的 run.cmd（GBK + CRLF，适配中文 Windows 控制台）。"""
+
+from __future__ import annotations
+
+import os
+
+BATCH = r"""@echo off
+chcp 936 >nul
+setlocal
+title Clearance Guard
+cd /d "%~dp0"
+
+set "APP=%~dp0app.py"
+if not exist "%APP%" (
+    echo [错误] 未找到 app.py，请把 run.cmd 放在项目根目录。
+    pause
+    exit /b 1
+)
+
+set "PYEXE="
+if exist "%~dp0.venv\Scripts\python.exe" set "PYEXE=%~dp0.venv\Scripts\python.exe"
+if not defined PYEXE if exist "%~dp0venv\Scripts\python.exe" set "PYEXE=%~dp0venv\Scripts\python.exe"
+if not defined PYEXE for /f "delims=" %%P in ('where python.exe 2^>nul') do if not defined PYEXE set "PYEXE=%%P"
+if not defined PYEXE for /f "delims=" %%P in ('py -3 -c "import sys;print(sys.executable)" 2^>nul') do if not defined PYEXE set "PYEXE=%%P"
+
+if not defined PYEXE (
+    echo.
+    echo [错误] 没有找到 Python 3.10+。
+    echo        请安装 Python，并在安装时勾选 "Add python.exe to PATH"，然后重新双击本文件。
+    echo.
+    pause
+    exit /b 1
+)
+
+"%PYEXE%" -c "import PySide6" >nul 2>nul
+if errorlevel 1 (
+    echo [提示] 当前 Python 缺少 PySide6，正在安装依赖...
+    "%PYEXE%" -m pip install -r "%~dp0requirements.txt"
+    if errorlevel 1 (
+        echo.
+        echo [错误] 依赖安装失败，请手动执行：
+        echo        "%PYEXE%" -m pip install PySide6
+        echo.
+        pause
+        exit /b 1
+    )
+)
+
+"%PYEXE%" -c "import clearance_check.ui.main_window" >nul 2>nul
+if errorlevel 1 (
+    echo [错误] 程序导入失败，完整错误如下：
+    echo.
+    "%PYEXE%" -c "import clearance_check.ui.main_window"
+    echo.
+    pause
+    exit /b 1
+)
+
+set "PYW=%PYEXE:python.exe=pythonw.exe%"
+if not exist "%PYW%" set "PYW=%PYEXE%"
+
+echo 正在启动 Clearance Guard ...
+if /i "%PYW%"=="%PYEXE%" (
+    "%PYEXE%" "%APP%" %*
+    set "CODE=%ERRORLEVEL%"
+) else (
+    start "" "%PYW%" "%APP%" %*
+    set "CODE=0"
+)
+
+if not "%CODE%"=="0" (
+    echo.
+    echo 程序异常退出，错误码 %CODE%。
+    pause
+)
+endlocal
+"""
+
+
+def main() -> int:
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    target = os.path.join(root, "run.cmd")
+    data = BATCH.replace("\r\n", "\n").replace("\n", "\r\n")
+    with open(target, "wb") as handle:
+        handle.write(data.encode("gbk"))
+    print(f"wrote {target} ({len(data.encode('gbk'))} bytes, GBK/CRLF)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

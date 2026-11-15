@@ -1,0 +1,19 @@
+{
+  "include": ["app.py", "clearance_check"],
+  "exclude": ["**/__pycache__", "dev", "scripts", "tests"],
+  "typeCheckingMode": "basic",
+  "reportUninitializedInstanceVariable": "none",
+  "reportMissingTypeArgument": "none",
+  "reportUnannotatedClassAttribute": "none",
+  "reportImplicitStringConcatenation": "none",
+  "reportUnusedCallResult": "none",
+  "reportUnusedParameter": "none",
+  "reportImplicitOverride": "none",
+  "reportUnknownMemberType": "none",
+  "reportUnknownVariableType": "none",
+  "reportUnknownArgumentType": "none",
+  "reportUnknownParameterType": "none",
+  "reportUnknownLambdaType": "none",
+  "reportMissingParameterType": "none",
+  "reportAttributeAccessIssue": "warning"
+}
