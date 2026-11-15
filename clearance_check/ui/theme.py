@@ -9,14 +9,22 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPointF, QRectF, Qt
+import sys
+
+from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, Qt
 from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QPolygonF
-from PySide6.QtWidgets import QProxyStyle, QStyle
+from PySide6.QtWidgets import (
+    QDialog,
+    QMainWindow,
+    QProxyStyle,
+    QStyle,
+)
 
 __all__ = [
     "BG", "SURFACE", "PANEL", "CARD", "CARD_HOVER", "BORDER", "BORDER_STRONG",
-    "TEXT", "MUTED", "ACCENT", "ACCENT_DARK", "ACCENT_SOFT",
-    "OK", "WARN", "DANGER", "CLASS_COLORS", "QSS", "class_color", "apply_theme",
+    "TITLEBAR", "TEXT", "MUTED", "ACCENT", "ACCENT_DARK", "ACCENT_SOFT",
+    "OK", "WARN", "DANGER", "CLASS_COLORS", "QSS", "class_color",
+    "apply_dark_titlebar", "apply_theme",
 ]
 
 # ---- 颜色令牌 -------------------------------------------------------------
@@ -27,6 +35,7 @@ CARD = "#1B2336"          # 卡片 / 分组
 CARD_HOVER = "#22304A"
 BORDER = "#26334A"        # 常规分隔线
 BORDER_STRONG = "#475569"  # 明确边界（焦点、选中框）
+TITLEBAR = SURFACE        # 原生标题栏：与顶栏起始色一致，窗口上下浑然一体
 TEXT = "#F8FAFC"
 MUTED = "#94A3B8"         # 次级文字（对比度 ≈ 7:1 on BG）
 ACCENT = "#2563EB"        # 操作色（与白字对比度 5.2:1）
@@ -66,9 +75,10 @@ QToolTip {{
 }}
 
 /* ---------- 顶栏 ---------- */
+/* 起点色与原生标题栏同色，标题栏 → 顶栏 → 主区是一条连续的同色系过渡 */
 QFrame#Header {{
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                                stop:0 #16223A, stop:1 {BG});
+                                stop:0 {TITLEBAR}, stop:1 {BG});
     border-bottom: 1px solid {BORDER};
 }}
 QLabel#AppTitle {{
@@ -463,6 +473,81 @@ class _CheckStyle(QProxyStyle):
         painter.restore()
 
 
+def _colorref(color: str) -> int:
+    """#RRGGBB → DWM 需要的 COLORREF（0x00BBGGRR）。"""
+    value = color.lstrip("#")
+    red, green, blue = (int(value[index : index + 2], 16) for index in (0, 2, 4))
+    return red | (green << 8) | (blue << 16)
+
+
+def apply_dark_titlebar(window) -> bool:
+    """把 Windows 原生标题栏染成主题深色，成功返回 True。
+
+    - Win10 1809+：DWMWA_USE_IMMERSIVE_DARK_MODE 启用系统深色标题栏；
+    - Win11 22000+：再显式指定标题栏 / 文字 / 边框颜色，与 QSS 令牌一致。
+    非 Windows 或调用失败时静默返回 False，界面表现不受影响。
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        hwnd = int(window.winId())
+        if not hwnd:
+            return False
+        set_attribute = ctypes.windll.dwmapi.DwmSetWindowAttribute
+        set_attribute.argtypes = (
+            wintypes.HWND,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+        )
+        set_attribute.restype = ctypes.c_long
+
+        def _set(attribute: int, value: int) -> bool:
+            data = ctypes.c_int(value)
+            return (
+                set_attribute(
+                    wintypes.HWND(hwnd),
+                    attribute,
+                    ctypes.byref(data),
+                    ctypes.sizeof(data),
+                )
+                == 0
+            )
+
+        # 20 = DWMWA_USE_IMMERSIVE_DARK_MODE（1903+），19 为早期编号
+        dark = any(_set(attribute, 1) for attribute in (20, 19))
+        # 颜色属性 Win11 才支持，旧系统返回 E_INVALIDARG，忽略即可
+        _set(35, _colorref(TITLEBAR))   # DWMWA_CAPTION_COLOR
+        _set(36, _colorref(TEXT))       # DWMWA_TEXT_COLOR
+        _set(34, _colorref(BORDER))     # DWMWA_BORDER_COLOR
+        return dark
+    except Exception:  # noqa: BLE001 - DWM 失败不应影响启动
+        return False
+
+
+class _DarkTitleBarFilter(QObject):
+    """窗口显示时刷新原生标题栏（主窗口、对话框、消息框一并覆盖）。"""
+
+    def eventFilter(self, obj, event):  # noqa: N802
+        if (
+            event.type() == QEvent.Type.Show
+            and isinstance(obj, (QMainWindow, QDialog))
+            and obj.isWindow()
+        ):
+            apply_dark_titlebar(obj)
+        return super().eventFilter(obj, event)
+
+
+_TITLEBAR_FILTER: _DarkTitleBarFilter | None = None
+
+
 def apply_theme(app) -> None:
+    global _TITLEBAR_FILTER
     app.setStyle(_CheckStyle("Fusion"))
     app.setStyleSheet(QSS)
+    if _TITLEBAR_FILTER is None:
+        _TITLEBAR_FILTER = _DarkTitleBarFilter(app)
+        app.installEventFilter(_TITLEBAR_FILTER)
