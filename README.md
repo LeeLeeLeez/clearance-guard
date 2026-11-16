@@ -96,11 +96,30 @@ web/                      前端（React + oink-ui）
 
 **前端开发**：
 
+前端依赖 **oink-ui**（本地设计系统），走 `file:` 依赖，源码需要放在项目**同级的
+`oink_ui/oink-ui`** 目录（即与 `clearance_check` 并列）：
+
+```
+<工作区>/
+├─ clearance_check/     本项目
+└─ oink_ui/oink-ui/     oink-ui 源码（需要先 npm install && npm run build 生成 dist）
+```
+
+首次准备：
+
+```bat
+git clone https://github.com/oinkvm/oink-ui.git ../oink_ui/oink-ui
+cd ../oink_ui/oink-ui && npm install && npm run build
+```
+
 ```bat
 cd web
 npm install
 npm run dev        :: 5178，/api 代理到 8770
 ```
+
+> 改了 oink-ui 源码后要在 `oink_ui/oink-ui` 里重新 `npm run build`（包的入口指向 `dist/`），
+> 本项目侧无需重装。若不想带本地源码，可把 `web/package.json` 的依赖改回 npm 版本 `^1.0.11`。
 
 **HTTP API**（38 个端点，全部 JSON）：
 
