@@ -97,6 +97,12 @@ class AppState:
     violations: list = field(default_factory=list)
     aggregated: list = field(default_factory=list)
 
+    #: 配置基线：上次扫描 / 导入快照的分类与安装焊盘电位。
+    #: 重新扫描时优先沿用（只对新增网络自动分类），避免人工确认结果被覆盖。
+    baseline: dict = field(default_factory=dict)
+    baseline_mounts: list = field(default_factory=list)
+    baseline_name: str = ""
+
     project_path: str = ""
     source_note: str = ""
     demo_mode: bool = False
@@ -348,6 +354,15 @@ def board_for_view() -> dict[str, Any]:
             "b": v.designator_b,
             "deficit": round(float(getattr(v, "deficit_mm", 0.0) or 0.0), 3),
             "severity": v.severity,
+            # 悬停提示用的明细：网络 / 类别 / 实测与要求 / 依据规则 / 焊盘对数
+            "net_a": v.net_a,
+            "net_b": v.net_b,
+            "class_a": label_of.get(getattr(v.class_a, "value", ""), ""),
+            "class_b": label_of.get(getattr(v.class_b, "value", ""), ""),
+            "actual": round(float(getattr(v, "actual_mm", 0.0) or 0.0), 3),
+            "required": round(float(getattr(v, "required_mm", 0.0) or 0.0), 3),
+            "rule": getattr(v, "rule_name", ""),
+            "count": int(getattr(v, "count", 1) or 1),
         }
         for v in violations
     ]

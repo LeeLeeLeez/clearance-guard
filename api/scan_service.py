@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import copy
 import threading
 import time
 from pathlib import Path
@@ -16,6 +17,47 @@ from .store import STATE, TaskState, last_scan_path, snapshot_dir
 
 class ServiceError(RuntimeError):
     """直接给前端显示的错误（带处置提示）。"""
+
+
+# ------------------------------------------------------------ 配置基线
+def _baseline() -> tuple[dict[str, Any], list[Any], str]:
+    """取出配置基线（分类 / 安装焊盘电位 / 名称）。"""
+    with STATE.lock:
+        return dict(STATE.baseline), list(STATE.baseline_mounts), STATE.baseline_name
+
+
+def set_baseline(
+    classifications: dict[str, Any] | None,
+    mounts: list[Any] | None = None,
+    name: str = "",
+) -> None:
+    """记录配置基线：重新扫描时同名网络沿用这份分类，只对新增网络自动判定。"""
+    if not classifications:
+        return
+    with STATE.lock:
+        STATE.baseline = {key: copy.deepcopy(item) for key, item in classifications.items()}
+        STATE.baseline_mounts = copy.deepcopy(list(mounts or []))
+        STATE.baseline_name = name or "配置基线"
+
+
+def restore_last_baseline() -> None:
+    """启动时把上次自动保存的快照载入为基线（对齐旧版 _restore_last_snapshot）。"""
+    from clearance_check.snapshot import load_snapshot
+
+    path = last_scan_path()
+    if not path.is_file():
+        return
+    try:
+        snap = load_snapshot(path, reclassify=False)
+    except Exception as exc:  # noqa: BLE001 - 基线坏了不该影响启动
+        STATE.log(f"恢复上次快照失败：{exc}")
+        return
+    classifications = dict(getattr(snap, "classifications", {}) or {})
+    if not classifications:
+        return
+    mounts = list(getattr(getattr(snap, "board", None), "mounts", []) or [])
+    set_baseline(classifications, mounts, f"上次扫描（{path.name}）")
+    STATE.log(f"已载入配置基线：{path.name}（{len(classifications)} 个网络可沿用）")
 
 
 # ------------------------------------------------------------ 连接 / 工程
@@ -224,6 +266,7 @@ def _apply_result(
     report: Any,
     note: str,
     project_path: str,
+    baseline_mounts: list[Any] | None = None,
 ) -> None:
     from clearance_check.analysis.sheets import (
         build_sheet_index,
@@ -235,6 +278,13 @@ def _apply_result(
     )
 
     board.mounts = _make_mounts(getattr(report, "mount_pads", None))
+    if baseline_mounts:
+        # 安装焊盘的电位是人工指定的，重扫后按名称沿用，否则又变回默认副边
+        from clearance_check.analysis.merge import merge_mounts
+
+        kept = merge_mounts(board.mounts, baseline_mounts)
+        if kept:
+            STATE.log(f"沿用配置基线的安装焊盘电位：{kept} 个")
     board.floating_parts = _make_floating(getattr(report, "floating_parts", None))
     board.cutouts = _make_cutouts(getattr(report, "cutouts", None))
 
@@ -296,25 +346,58 @@ def _scan_job(kind: str, project_path: str, with_netlist: bool) -> None:
         elapsed = time.time() - started
 
         task.stage = "分类"
-        task.detail = "按网络名与拓扑判定电压类别…"
-        classifications = classify_board(board, getattr(report, "pins", []) or [])
-        note = f"自动分类全部 {len(classifications)} 个网络"
+        pins = getattr(report, "pins", []) or []
+        # 有配置基线时只对新增网络做自动判定，同名网络沿用人工确认过的结果
+        baseline, baseline_mounts, baseline_name = _baseline()
+        board_nets = {name for name in board.nets if name}
+        if baseline:
+            known = set(baseline)
+            new_nets = sorted(board_nets - known)
+            seeded = {
+                name: copy.deepcopy(item)
+                for name, item in baseline.items()
+                if name in board_nets
+            }
+            if new_nets:
+                task.detail = f"自动分类 {len(new_nets)} 个新网络（其余沿用基线）…"
+                auto = classify_board(board, pins, only_nets=set(new_nets))
+                classifications = {**seeded, **auto}
+                note = (
+                    f"自动分类 {len(new_nets)} 个新网络，"
+                    f"其余 {len(seeded)} 个沿用{baseline_name}"
+                )
+            else:
+                task.detail = "同名网络全部沿用配置基线…"
+                classifications = seeded
+                note = f"沿用{baseline_name}的 {len(seeded)} 个网络，未做自动分类"
+        else:
+            task.detail = "按网络名与拓扑判定电压类别…"
+            classifications = classify_board(board, pins)
+            note = f"自动分类全部 {len(board_nets)} 个网络"
 
         task.stage = "装配"
         task.detail = "生成图纸索引与参考地…"
         _apply_result(
             board,
             classifications,
-            getattr(report, "pins", []) or [],
+            pins,
             report,
             note,
             project_path,
+            baseline_mounts=baseline_mounts,
         )
 
         for line in getattr(report, "steps", []) or []:
             STATE.log(line)
         for warn in getattr(report, "warnings", []) or []:
             STATE.log("提示：" + str(warn))
+
+        # 本次结果成为下次扫描的配置基线（等价旧版把 last_scan.json 当基线）
+        set_baseline(
+            STATE.classifications,
+            getattr(STATE.board, "mounts", None),
+            "上次扫描",
+        )
 
         STATE.log(
             "扫描完成：器件 %s / 焊盘 %s / 网络 %s（用时 %.1fs）"
@@ -374,6 +457,13 @@ def _scan_pcb_job(project_path: str) -> None:
                     break
 
         board.mounts = _make_mounts(getattr(report, "mount_pads", None))
+        _, baseline_mounts, _ = _baseline()
+        if baseline_mounts:
+            from clearance_check.analysis.merge import merge_mounts
+
+            kept = merge_mounts(board.mounts, baseline_mounts)
+            if kept:
+                STATE.log(f"沿用配置基线的安装焊盘电位：{kept} 个")
         board.floating_parts = _make_floating(getattr(report, "floating_parts", None))
         board.cutouts = new_cutouts
         if not getattr(board, "outline", None):
@@ -572,8 +662,17 @@ def import_snapshot(path: str) -> dict[str, Any]:
         STATE.violations = []
         STATE.aggregated = []
 
+    # 导入的快照同时作为配置基线：之后「扫描工程」会沿用里面的分类与安装焊盘电位
+    set_baseline(
+        classifications,
+        getattr(board, "mounts", None),
+        f"快照 {Path(path).name}",
+    )
+
     _sanitize(board)
-    STATE.log(f"已导入快照：{path}")
+    # 顺手写成 last_scan.json：下次启动自动恢复的就是这份基线，不用重复导入
+    _auto_save()
+    STATE.log(f"已导入快照：{path}（已设为配置基线）")
     return {"ok": True, "path": str(path)}
 
 
