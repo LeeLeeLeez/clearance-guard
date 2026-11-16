@@ -24,6 +24,49 @@ const LABEL: Record<string, string> = {
   SECONDARY: '副边',
 }
 
+/**
+ * 数字输入框：输入过程用本地草稿，失焦或回车才提交。
+ *
+ * oink-ui 的 Input 是受控组件（onChange 给的是新值字符串），如果直接把
+ * rules 里的值绑回 value、onChange 又什么都不做，按键会被立刻回滚成旧值。
+ */
+function NumField({
+  value,
+  onCommit,
+}: {
+  value: string | number | undefined
+  onCommit: (value: string) => void
+}) {
+  const text = value === undefined ? '' : String(value)
+  const [draft, setDraft] = useState(text)
+
+  useEffect(() => {
+    setDraft(text)
+  }, [text])
+
+  return (
+    <Input
+      size="sm"
+      value={draft}
+      onChange={(next) => setDraft(next)}
+      onBlur={() => {
+        const next = draft.trim()
+        if (next === text) return
+        // 空值或非数字直接还原，避免后端 float('') 解析失败后静默丢弃整次修改
+        if (next === '' || !Number.isFinite(Number(next))) {
+          setDraft(text)
+          return
+        }
+        onCommit(next)
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+        if (e.key === 'Escape') setDraft(text)
+      }}
+    />
+  )
+}
+
 export default function RulesPage({ setStatus, setStatusError, active, revision }: PageProps) {
   const [rules, setRules] = useState<RulesResp | null>(null)
   const [busy, setBusy] = useState(false)
@@ -118,14 +161,9 @@ export default function RulesPage({ setStatus, setStatusError, active, revision 
   }
 
   const num = (key: keyof RulesResp) => (
-    <Input
-      size="sm"
-      value={String(rules[key] ?? '')}
-      onChange={() => undefined}
-      onBlur={(e) => {
-        const v = (e.target as HTMLInputElement).value.trim()
-        if (v !== String(rules[key] ?? '')) patch({ [key]: v })
-      }}
+    <NumField
+      value={rules[key] as string | number | undefined}
+      onCommit={(value) => patch({ [key]: value })}
     />
   )
 
@@ -176,15 +214,7 @@ export default function RulesPage({ setStatus, setStatusError, active, revision 
                         const value = rules.matrix?.[key]
                         return (
                           <td key={col} style={{ padding: '4px 8px', width: 140 }}>
-                            <Input
-                              size="sm"
-                              value={value === undefined ? '' : String(value)}
-                              onChange={() => undefined}
-                              onBlur={(e) => {
-                                const v = (e.target as HTMLInputElement).value.trim()
-                                if (v !== String(value ?? '')) patchMatrix(row, col, v)
-                              }}
-                            />
+                            <NumField value={value} onCommit={(next) => patchMatrix(row, col, next)} />
                           </td>
                         )
                       })}

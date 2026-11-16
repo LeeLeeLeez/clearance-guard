@@ -41,10 +41,10 @@ const NAV: NavDef[] = [
   {
     group: '审核流程',
     items: [
-      { id: 'scan', text: '工程与扫描', icon: 'file' },
-      { id: 'slot', text: '爬电隔离槽' },
-      { id: 'rules', text: '间距规则' },
-      { id: 'result', text: '违规结果' },
+      { id: 'scan', text: '工程与扫描', icon: 'folder' },
+      { id: 'slot', text: '爬电隔离槽', icon: 'grid' },
+      { id: 'rules', text: '间距规则', icon: 'sliders' },
+      { id: 'result', text: '违规结果', icon: 'alert' },
       { id: 'layout', text: '布局视图', icon: 'layout' },
     ],
   },

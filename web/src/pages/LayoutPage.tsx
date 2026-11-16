@@ -34,6 +34,36 @@ interface View {
   oy: number
 }
 
+type ViolationMark = LayoutData['violations'][number]
+
+/** 违规圈在画布上的屏幕位置，供鼠标命中判定。 */
+interface HitCircle {
+  index: number
+  sx: number
+  sy: number
+  r: number
+}
+
+interface TipState {
+  left: number
+  top: number
+  /** true = 显示在圆圈下方（靠近画布顶部时） */
+  below: boolean
+  item: ViolationMark
+}
+
+/** 提示框位置：默认贴在圆圈上方，靠顶部时改到下方，左右不出画布。 */
+function tipFor(hit: HitCircle, item: ViolationMark, width: number): TipState {
+  const below = hit.sy - hit.r < 96
+  const margin = 150
+  return {
+    left: Math.min(Math.max(hit.sx, margin), Math.max(width - margin, margin)),
+    top: below ? hit.sy + hit.r + 10 : hit.sy - hit.r - 10,
+    below,
+    item,
+  }
+}
+
 export default function LayoutPage({ setStatus, setStatusError, active, revision }: PageProps) {
   const [data, setData] = useState<LayoutData | null>(null)
   const [layer, setLayer] = useState<'all' | 'TOP' | 'BOTTOM'>('all')
@@ -51,6 +81,10 @@ export default function LayoutPage({ setStatus, setStatusError, active, revision
   const dragRef = useRef<{ x: number; y: number; ox: number; oy: number } | null>(null)
   const selectRef = useRef<{ x0: number; y0: number } | null>(null)
   const fittedRef = useRef(false)
+  // 违规圈的屏幕位置（每次重绘刷新）与当前悬停的圈，用于悬停提示
+  const hitsRef = useRef<HitCircle[]>([])
+  const hoverIndexRef = useRef(-1)
+  const [tip, setTip] = useState<TipState | null>(null)
 
   const load = useCallback(async () => {
     try {
@@ -176,21 +210,36 @@ export default function LayoutPage({ setStatus, setStatusError, active, revision
       })
     }
 
-    // 违规圈：ERROR 红 / WARNING 黄，按开关过滤
-    d.violations.forEach((v) => {
+    // 违规圈：ERROR 红 / WARNING 黄，按开关过滤；顺便记下屏幕位置供悬停提示
+    const hits: HitCircle[] = []
+    d.violations.forEach((v, index) => {
       const isError = v.severity === 'error'
       if (isError && !showError) return
       if (!isError && !showWarning) return
       // 半径按缺口放大，但给下限：0.2 mm 的缺口在整板缩放下不到 1px，不设下限就完全看不见
       const r = Math.max(9, Math.min(v.deficit * scale * 5, 44))
+      const sx = X(v.x)
+      const sy = Y(v.y)
       ctx.beginPath()
-      ctx.arc(X(v.x), Y(v.y), r, 0, Math.PI * 2)
+      ctx.arc(sx, sy, r, 0, Math.PI * 2)
       ctx.fillStyle = isError ? 'rgba(239,68,68,0.10)' : 'rgba(245,158,11,0.10)'
       ctx.fill()
       ctx.strokeStyle = isError ? 'rgba(239,68,68,0.95)' : 'rgba(245,158,11,0.95)'
       ctx.lineWidth = 1.6
       ctx.stroke()
+      hits.push({ index, sx, sy, r })
     })
+    hitsRef.current = hits
+    // 缩放 / 平移后让提示跟着圆圈走
+    const hovered = hoverIndexRef.current
+    if (hovered >= 0) {
+      const hit = hits.find((item) => item.index === hovered)
+      if (hit) setTip(tipFor(hit, d.violations[hovered], cssW))
+      else {
+        hoverIndexRef.current = -1
+        setTip(null)
+      }
+    }
 
     // 选区
     if (rect) {
@@ -241,7 +290,43 @@ export default function LayoutPage({ setStatus, setStatusError, active, revision
     draw()
   }
 
+  const clearTip = () => {
+    if (hoverIndexRef.current >= 0) {
+      hoverIndexRef.current = -1
+      setTip(null)
+    }
+  }
+
+  /** 鼠标落在某个违规圈里时，把该条的明细弹出来。 */
+  const updateHover = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const box = canvas.getBoundingClientRect()
+    const sx = e.clientX - box.left
+    const sy = e.clientY - box.top
+    let found = -1
+    let best = Number.POSITIVE_INFINITY
+    for (const hit of hitsRef.current) {
+      const dx = sx - hit.sx
+      const dy = sy - hit.sy
+      const distance = dx * dx + dy * dy
+      if (distance <= hit.r * hit.r && distance < best) {
+        best = distance
+        found = hit.index
+      }
+    }
+    if (found === hoverIndexRef.current) return
+    hoverIndexRef.current = found
+    if (found < 0 || !data) {
+      setTip(null)
+      return
+    }
+    const hit = hitsRef.current.find((item) => item.index === found)
+    if (hit) setTip(tipFor(hit, data.violations[found], canvas.clientWidth))
+  }
+
   const onDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    clearTip()
     const [x, y] = toBoard(e)
     if (selecting) {
       selectRef.current = { x0: x, y0: y }
@@ -259,7 +344,11 @@ export default function LayoutPage({ setStatus, setStatusError, active, revision
       return
     }
     const drag = dragRef.current
-    if (!drag) return
+    if (!drag) {
+      updateHover(e)
+      return
+    }
+    clearTip()
     viewRef.current = {
       ...viewRef.current,
       ox: drag.ox + (e.clientX - drag.x),
@@ -275,6 +364,11 @@ export default function LayoutPage({ setStatus, setStatusError, active, revision
       setSelecting(false)
       setStatus('选区已就绪，点「求解选区」')
     }
+  }
+
+  const onLeave = () => {
+    onUp()
+    clearTip()
   }
 
   // ------------------------------------------------------------ 动作
@@ -489,13 +583,67 @@ export default function LayoutPage({ setStatus, setStatusError, active, revision
             <div className="canvas-wrap">
               <canvas
                 ref={canvasRef}
-                style={{ height: 'clamp(320px, 58vh, 760px)' }}
+                style={{
+                  height: 'clamp(320px, 58vh, 760px)',
+                  cursor: tip ? 'help' : 'crosshair',
+                }}
                 onWheel={onWheel}
                 onMouseDown={onDown}
                 onMouseMove={onMove}
                 onMouseUp={onUp}
-                onMouseLeave={onUp}
+                onMouseLeave={onLeave}
               />
+              {tip && (
+                <div
+                  className={tip.below ? 'canvas-tip canvas-tip--below' : 'canvas-tip'}
+                  data-severity={tip.item.severity === 'error' ? 'error' : 'warning'}
+                  style={{ left: tip.left, top: tip.top }}
+                >
+                  <div className="canvas-tip__head">
+                    <span className="canvas-tip__sev">
+                      {tip.item.severity === 'error' ? 'ERROR' : 'WARNING'}
+                    </span>
+                    <span className="canvas-tip__pair">
+                      {tip.item.a || '走线'} ↔ {tip.item.b || '走线'}
+                    </span>
+                  </div>
+                  <div className="canvas-tip__row">
+                    <span>网络</span>
+                    <b>
+                      {tip.item.net_a || '—'} ↔ {tip.item.net_b || '—'}
+                    </b>
+                  </div>
+                  <div className="canvas-tip__row">
+                    <span>类别</span>
+                    <b>
+                      {tip.item.class_a || '—'} / {tip.item.class_b || '—'}
+                    </b>
+                  </div>
+                  <div className="canvas-tip__row">
+                    <span>间距</span>
+                    <b>
+                      实测 {Number(tip.item.actual ?? 0).toFixed(2)} · 要求{' '}
+                      {Number(tip.item.required ?? 0).toFixed(2)} mm
+                    </b>
+                  </div>
+                  <div className="canvas-tip__row">
+                    <span>缺口</span>
+                    <b className="canvas-tip__deficit">
+                      {Number(tip.item.deficit ?? 0).toFixed(2)} mm
+                    </b>
+                  </div>
+                  <div className="canvas-tip__row">
+                    <span>依据</span>
+                    <b>{tip.item.rule || '—'}</b>
+                  </div>
+                  {tip.item.count > 1 && (
+                    <div className="canvas-tip__row">
+                      <span>焊盘对</span>
+                      <b>{tip.item.count} 处</b>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
             <div className="stack-gap" />
             <div className="canvas-legend">

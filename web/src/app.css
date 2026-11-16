@@ -245,6 +245,81 @@ body {
   cursor: crosshair;
 }
 
+/* 违规圈悬停提示 */
+.canvas-tip {
+  position: absolute;
+  z-index: 6;
+  transform: translate(-50%, -100%);
+  min-width: 240px;
+  max-width: 340px;
+  padding: 9px 11px;
+  border: 1px solid var(--ok-line);
+  border-left: 3px solid var(--ok-danger);
+  border-radius: var(--ok-r-2);
+  background: var(--ok-bg);
+  box-shadow: 0 12px 30px rgb(15 23 42 / 0.24);
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--ok-text);
+  pointer-events: none;
+}
+
+.canvas-tip--below {
+  transform: translate(-50%, 0);
+}
+
+.canvas-tip[data-severity='warning'] {
+  border-left-color: var(--ok-warning);
+}
+
+.canvas-tip__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--ok-line);
+}
+
+.canvas-tip__sev {
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: #fff;
+  background: var(--ok-danger);
+}
+
+.canvas-tip[data-severity='warning'] .canvas-tip__sev {
+  background: var(--ok-warning);
+}
+
+.canvas-tip__pair {
+  font-weight: 600;
+}
+
+.canvas-tip__row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.canvas-tip__row > span {
+  flex: 0 0 34px;
+  color: var(--ok-text-3);
+}
+
+.canvas-tip__row > b {
+  font-weight: 500;
+  font-family: var(--ok-font-mono);
+  word-break: break-all;
+}
+
+.canvas-tip__deficit {
+  color: var(--ok-danger);
+}
+
 .canvas-legend {
   display: flex;
   flex-wrap: wrap;

@@ -5,6 +5,7 @@ import {
   CardBody,
   CardHeader,
   EmptyState,
+  Icon,
   Input,
   Page,
   PageHeader,
@@ -34,6 +35,18 @@ import type {
 
 type SubTab = 'log' | 'components' | 'nets' | 'mounts' | 'floating'
 
+type IconName = React.ComponentProps<typeof Icon>['name']
+
+/** 标签页标题：图标 + 文字，图标跟随文字颜色。 */
+function tabLabel(icon: IconName, text: string) {
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+      <Icon name={icon} size={16} />
+      {text}
+    </span>
+  )
+}
+
 export default function ScanPage({ setStatus, setStatusError, active, revision, onRefreshGlobal }: PageProps) {
   const [sub, setSub] = useState<SubTab>('nets')
 
@@ -47,12 +60,12 @@ export default function ScanPage({ setStatus, setStatusError, active, revision, 
         items={[
           {
             value: 'log',
-            label: '扫描日志',
+            label: tabLabel('list', '扫描日志'),
             content: <LogPanel active={active && sub === 'log'} />,
           },
           {
             value: 'components',
-            label: '器件列表',
+            label: tabLabel('tag', '器件列表'),
             content: (
               <ComponentsPanel
                 {...{ setStatus, setStatusError, active, revision, onRefreshGlobal }}
@@ -61,17 +74,17 @@ export default function ScanPage({ setStatus, setStatusError, active, revision, 
           },
           {
             value: 'nets',
-            label: '网络电压分类',
+            label: tabLabel('zap', '网络电压分类'),
             content: <NetsPanel {...{ setStatus, setStatusError, active, revision, onRefreshGlobal }} />,
           },
           {
             value: 'mounts',
-            label: '安装焊盘',
+            label: tabLabel('grid', '安装焊盘'),
             content: <MountsPanel {...{ setStatus, setStatusError, active, revision, onRefreshGlobal }} />,
           },
           {
             value: 'floating',
-            label: '无网络器件',
+            label: tabLabel('shuffle', '无网络器件'),
             content: <FloatingPanel {...{ setStatus, setStatusError, active, revision, onRefreshGlobal }} />,
           },
         ]}
@@ -508,7 +521,11 @@ function NetsPanel({ setStatus, setStatusError, active, revision }: PageProps) {
                 label="图纸"
                 value={sheet}
                 onChange={(v) => setSheet(v)}
-                items={sheetNames.map((name) => ({ value: name, label: name, content: null }))}
+                items={sheetNames.map((name) => ({
+                  value: name,
+                  label: tabLabel('file', name),
+                  content: null,
+                }))}
               />
             </div>
             <div className="stack-gap" />

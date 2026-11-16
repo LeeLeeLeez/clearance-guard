@@ -13,7 +13,7 @@
     "tauri:build": "tauri build"
   },
   "dependencies": {
-    "oink-ui": "file:../../oink_ui/oink-ui",
+    "oink-ui": "file:D:/AI_models/oink_ui/oink-ui",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

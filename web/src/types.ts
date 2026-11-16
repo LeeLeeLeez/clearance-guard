@@ -275,7 +275,27 @@ export interface LayoutData {
     h: number
     points: [number, number][]
   }[]
-  violations: { x: number; y: number; a: string; b: string; deficit: number; severity: string }[]
+  violations: {
+    x: number
+    y: number
+    a: string
+    b: string
+    deficit: number
+    severity: string
+    /** 网络 A / B（悬停提示） */
+    net_a: string
+    net_b: string
+    /** 电压类别标签 */
+    class_a: string
+    class_b: string
+    /** 实测 / 要求间距（mm） */
+    actual: number
+    required: number
+    /** 依据规则 */
+    rule: string
+    /** 同一器件对涉及的焊盘对数 */
+    count: number
+  }[]
   class_labels: Record<string, string>
 }
 
