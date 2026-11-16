@@ -57,6 +57,9 @@ class ClearanceRules:
     #: 不同器件焊盘之间的最小间距（与网络、电压无关），0 表示不检查
     component_gap_mm: float = 0.3
     component_gap_enabled: bool = True
+    #: 器件 3D 本体之间的最小间距（按桥接读到的本体外形投影判定）
+    body_gap_mm: float = 0.3
+    body_gap_enabled: bool = True
 
     # ---- 查询 -----------------------------------------------------
     def base_gap(self, a: NetClass, b: NetClass) -> float:
@@ -129,6 +132,8 @@ class ClearanceRules:
             "board_edge_gap_mm": self.board_edge_gap_mm,
             "board_edge_enabled": self.board_edge_enabled,
             "component_gap_mm": self.component_gap_mm,
+            "body_gap_mm": self.body_gap_mm,
+            "body_gap_enabled": self.body_gap_enabled,
             "component_gap_enabled": self.component_gap_enabled,
         }
 
@@ -162,6 +167,8 @@ class ClearanceRules:
             data.get("board_edge_enabled", rules.board_edge_enabled)
         )
         rules.component_gap_mm = float(data.get("component_gap_mm", rules.component_gap_mm))
+        rules.body_gap_mm = float(data.get("body_gap_mm", rules.body_gap_mm))
+        rules.body_gap_enabled = bool(data.get("body_gap_enabled", rules.body_gap_enabled))
         rules.component_gap_enabled = bool(
             data.get("component_gap_enabled", rules.component_gap_enabled)
         )
@@ -174,7 +181,9 @@ class ClearanceRules:
 
     @classmethod
     def load(cls, path: str | Path) -> "ClearanceRules":
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        from ..plainfile import read_text
+
+        data = json.loads(read_text(path))
         return cls.from_dict(data)
 
 

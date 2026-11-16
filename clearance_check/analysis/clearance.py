@@ -418,6 +418,81 @@ def find_violations(
                 )
             )
 
+    # 器件 3D 本体之间的干涉 / 最小间距
+    if rules.body_gap_enabled and rules.body_gap_mm > 0:
+        limit = rules.body_gap_mm
+        def side(comp) -> str:
+            layer = str(getattr(comp, "layer", "") or "TOP").upper()
+            return "BOTTOM" if "BOTTOM" in layer else "TOP"
+
+        def pad_polys(comp):
+            """器件每个焊盘的真实铜箔多边形。
+
+            之前用 max(宽,高) 当边长拼正方形，长条形焊盘会被放大成方块，
+            0.46 mm 的真实间隙会被算成 0.09 mm，误判成“本体几乎重叠”。
+            """
+            return [pad_polygon(pad) for pad in board.pads_of_component(comp.designator)]
+
+        bodies = []
+        for designator, comp in board.components.items():
+            pad_list = pad_polys(comp)
+            body = getattr(comp, "body_bbox", None)  # 3D 本体（机械层投影）
+            box = body or getattr(comp, "bbox", None)
+            if not box and pad_list:
+                xs = [point[0] for poly in pad_list for point in poly]
+                ys = [point[1] for poly in pad_list for point in poly]
+                box = (min(xs), min(ys), max(xs), max(ys))
+            if box:
+                bodies.append((designator, comp, box, pad_list, body))
+        for index, (name_a, comp_a, box_a, pads_a, body_a) in enumerate(bodies):
+            for name_b, comp_b, box_b, pads_b, body_b in bodies[index + 1:]:
+                # 正反面的器件在 XY 上重叠是正常的，不判干涉
+                if side(comp_a) != side(comp_b):
+                    continue
+                if bbox_gap(box_a, box_b) > limit + 0.5:
+                    continue  # 粗筛，省掉大量逐焊盘计算
+                if body_a and body_b:
+                    # 两个器件都有 3D 本体 → 直接按本体投影外框判
+                    gap = bbox_gap(body_a, body_b)
+                elif body_a or body_b:
+                    # 只有一方有 3D 本体：拿它跟另一方的占位外框（bbox）比，
+                    # 否则会拿焊盘去比，像 U9 与 C106 这种贴着的会被漏掉。
+                    gap = bbox_gap(body_a or box_a, body_b or box_b)
+                elif pads_a and pads_b:
+                    gap = min(
+                        polygon_distance(poly_a, poly_b)
+                        for poly_a in pads_a
+                        for poly_b in pads_b
+                    )
+                else:
+                    gap = bbox_gap(box_a, box_b)
+                if gap >= limit - MIN_DEFICIT_MM:
+                    continue
+                x = (max(box_a[0], box_b[0]) + min(box_a[2], box_b[2])) / 2
+                y = (max(box_a[1], box_b[1]) + min(box_a[3], box_b[3])) / 2
+                violations.append(
+                    Violation(
+                        net_a="",
+                        net_b="",
+                        item_a=name_a,
+                        item_b=name_b,
+                        pad_a=f"{name_a}（本体）",
+                        pad_b=f"{name_b}（本体）",
+                        class_a=NetClass.UNKNOWN,
+                        class_b=NetClass.UNKNOWN,
+                        x=x,
+                        y=y,
+                        actual_mm=round(gap, 3),
+                        required_mm=round(limit, 3),
+                        rule_name=f"器件本体最小间距 {limit:g} mm",
+                        ax=(box_a[0] + box_a[2]) / 2,
+                        ay=(box_a[1] + box_a[3]) / 2,
+                        bx=(box_b[0] + box_b[2]) / 2,
+                        by=(box_b[1] + box_b[3]) / 2,
+                        severity="error",
+                    )
+                )
+
     violations.sort(key=lambda v: v.deficit_mm, reverse=True)
     return violations
 

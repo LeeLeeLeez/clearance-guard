@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .plainfile import read_text
 from .model import (
     Board,
     BoardCutout,
@@ -84,6 +85,7 @@ def _component_dict(comp: Component) -> dict[str, Any]:
         "pad_count": comp.pad_count,
         "bbox": list(comp.bbox) if comp.bbox else None,
         "category": comp.category,
+        "body_bbox": list(comp.body_bbox) if getattr(comp, "body_bbox", None) else None,
     }
 
 
@@ -227,6 +229,7 @@ def build_snapshot(
             "floating_parts": [_floating_dict(f) for f in getattr(board, "floating_parts", [])],
             "cutouts": [_cutout_dict(c) for c in getattr(board, "cutouts", [])],
             "outline": [[round(x, 4), round(y, 4)] for x, y in getattr(board, "outline", [])],
+            "outline_version": int(getattr(board, "outline_version", 0)),
         },
         "pins": pins,
         "sheets": {
@@ -295,6 +298,11 @@ def _board_from_dict(data: dict[str, Any]) -> Board:
                 height=float(item.get("height") or 0.0),
                 pad_count=int(item.get("pad_count") or 0),
                 category=str(item.get("category") or ""),
+                body_bbox=(
+                    tuple(float(v) for v in item["body_bbox"])
+                    if item.get("body_bbox")
+                    else None
+                ),
                 bbox=(
                     tuple(float(v) for v in item["bbox"])
                     if isinstance(item.get("bbox"), (list, tuple)) and len(item["bbox"]) == 4
@@ -382,6 +390,7 @@ def _board_from_dict(data: dict[str, Any]) -> Board:
         if isinstance(item, dict)
     ]
 
+    board.outline_version = int(data.get("outline_version") or 0)
     board.outline = [
         (float(p[0]), float(p[1]))
         for p in (data.get("outline") or [])
@@ -450,7 +459,7 @@ def _classifications_from_list(items: list[dict[str, Any]]) -> dict[str, NetClas
 def load_snapshot(path: str | Path, reclassify: bool = True) -> ScanSnapshot:
     target = Path(path)
     try:
-        raw = target.read_text(encoding="utf-8")
+        raw = read_text(target)
     except OSError as exc:
         raise SnapshotError(f"无法读取快照文件：{exc}") from exc
     try:

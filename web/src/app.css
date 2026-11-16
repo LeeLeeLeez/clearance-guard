@@ -1,0 +1,312 @@
+/* 应用级样式 —— 全部基于 oink-ui 令牌，随明暗主题自动跟随。 */
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--ok-font);
+  background: var(--ok-bg);
+  color: var(--ok-text);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ------------------------------------------------------------- 顶栏 */
+.appbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.appbar__title {
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.appbar__sub {
+  font-size: 12px;
+  color: var(--ok-text-3);
+  white-space: nowrap;
+}
+
+.appbar__spacer {
+  flex: 1 1 auto;
+}
+
+/* --------------------------------------------------------- 工具条 */
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+}
+
+.toolbar__group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.toolbar__label {
+  font-size: 12px;
+  color: var(--ok-text-3);
+  white-space: nowrap;
+}
+
+.toolbar__split {
+  width: 1px;
+  height: 22px;
+  background: var(--ok-line);
+  margin: 0 4px;
+}
+
+.toolbar__grow {
+  flex: 1 1 auto;
+}
+
+/* --------------------------------------------------------- 统计条 */
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(126px, 1fr));
+  gap: 10px;
+}
+
+.metric {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 12px;
+  border: 1px solid var(--ok-line);
+  border-radius: var(--ok-r-2);
+  background: var(--ok-surface);
+  min-width: 0;
+}
+
+.metric__label {
+  font-size: 11.5px;
+  color: var(--ok-text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.metric__value {
+  font-variant-numeric: tabular-nums;
+  font-size: clamp(15px, calc(13px + 0.2vw), 18px);
+  font-weight: 700;
+  font-family: var(--ok-font-display);
+}
+
+.metric[data-tone='ok'] .metric__value {
+  color: var(--ok-success);
+}
+
+.metric[data-tone='warn'] .metric__value {
+  color: var(--ok-warning);
+}
+
+.metric[data-tone='danger'] .metric__value {
+  color: var(--ok-danger);
+}
+
+/* ------------------------------------------------------------ 状态栏 */
+.statusbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 34px;
+  padding: 6px 14px;
+  font-size: 12.5px;
+  color: var(--ok-text-2);
+  background: var(--ok-surface);
+  border-top: 1px solid var(--ok-line);
+}
+
+.statusbar__dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: var(--ok-r-full);
+  background: var(--ok-accent);
+}
+
+.statusbar--error .statusbar__dot {
+  background: var(--ok-danger);
+}
+
+.statusbar--busy .statusbar__dot {
+  background: var(--ok-warning);
+}
+
+.statusbar__text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.statusbar__spacer {
+  flex: 1 1 auto;
+}
+
+.statusbar__task {
+  font-variant-numeric: tabular-nums;
+  color: var(--ok-text-3);
+}
+
+/* ------------------------------------------------------- 日志 / 表格 */
+.log {
+  margin: 0;
+  padding: 10px 12px;
+  max-height: clamp(180px, 34vh, 520px);
+  overflow: auto;
+  font-family: var(--ok-font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--ok-text-2);
+  background: var(--ok-well);
+  border: 1px solid var(--ok-line);
+  border-radius: var(--ok-r-2);
+}
+
+.log:empty::before {
+  content: '（暂无输出）';
+  color: var(--ok-text-3);
+}
+
+.cg-table {
+  --ok-select-min: 86px;
+  font-variant-numeric: tabular-nums;
+}
+
+.cg-mono {
+  font-family: var(--ok-font-mono);
+  font-size: 12.5px;
+}
+
+.cg-num {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.cg-cell-edit {
+  min-width: 62px;
+}
+
+/* 类别色点：只表达电压性质 */
+.cg-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 6px;
+  border-radius: var(--ok-r-full);
+  vertical-align: middle;
+}
+
+.cg-dot[data-cls='PRIMARY_CONST'] {
+  background: #f59e0b;
+}
+
+.cg-dot[data-cls='PRIMARY_SWITCHING'] {
+  background: #ef4444;
+}
+
+.cg-dot[data-cls='SECONDARY'] {
+  background: #06b6d4;
+}
+
+.cg-dot[data-cls='UNKNOWN'] {
+  background: var(--ok-text-3);
+}
+
+/* ------------------------------------------------------- 布局视图 */
+.canvas-wrap {
+  position: relative;
+  width: 100%;
+  border: 1px solid var(--ok-line);
+  border-radius: var(--ok-r-2);
+  background: var(--ok-well);
+  overflow: hidden;
+}
+
+.canvas-wrap canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  touch-action: none;
+  cursor: crosshair;
+}
+
+.canvas-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  font-size: 12px;
+  color: var(--ok-text-2);
+}
+
+.canvas-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.canvas-legend i {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  display: inline-block;
+}
+
+/* ------------------------------------------------------------ 其它 */
+.hint {
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--ok-text-2);
+}
+
+.stack-gap {
+  height: 4px;
+}
+
+.pg-col {
+  display: flex;
+  flex-direction: column;
+  gap: clamp(12px, 0.9vw, 18px);
+  min-width: 0;
+}
+
+.pg-grid--2 {
+  display: grid;
+  grid-template-columns: minmax(300px, 1fr) minmax(0, 1.6fr);
+  gap: clamp(12px, 0.9vw, 18px);
+  align-items: start;
+  width: 100%;
+  min-width: 0;
+}
+
+@media (max-width: 1080px) {
+  .pg-grid--2 {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.ok-page-header__title {
+  font-size: clamp(18px, calc(14px + 0.36vw), 26px);
+}
+
+.ok-table table {
+  font-size: clamp(12.5px, calc(12px + 0.1vw), 14px);
+}
+
+.ok-table th {
+  font-size: clamp(11px, calc(10.4px + 0.08vw), 12.5px);
+}

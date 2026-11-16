@@ -42,6 +42,22 @@ def main() -> int:
     if "--demo" in sys.argv:
         window._load_demo()
 
+    # 命令行直接打开快照：ClearanceGuard.exe --snapshot <file.json>
+    if "--outline" in sys.argv:
+        index = sys.argv.index("--outline")
+        if index + 1 < len(sys.argv):
+            try:
+                window._import_outline_html_inner(sys.argv[index + 1])
+            except Exception:  # noqa: BLE001
+                import traceback
+
+                window._append_log("板框导入失败：" + traceback.format_exc())
+
+    if "--snapshot" in sys.argv:
+        index = sys.argv.index("--snapshot")
+        if index + 1 < len(sys.argv):
+            window._import_snapshot_path(sys.argv[index + 1])
+
     if "--smoke" in sys.argv:
         QTimer.singleShot(2000, app.quit)
 

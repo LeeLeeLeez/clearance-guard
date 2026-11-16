@@ -489,6 +489,43 @@ class EdaAgentSession:
             return [p for p in (payload.get("pins") or []) if isinstance(p, dict)]
         return [p for p in (payload or []) if isinstance(p, dict)]
 
+    def component_bodies(self) -> list[dict[str, Any]]:
+        """读取 PCB 上的 3D 本体（eComponentBodyObject）投影外框，单位 mm。"""
+        try:
+            payload = self._call(
+                "obj_query",
+                {
+                    "object_type": "eComponentBodyObject",
+                    "properties": "Layer,BoundsLeft,BoundsBottom,BoundsRight,BoundsTop",
+                    "scope": "active_doc",
+                    "limit": 5000,
+                },
+                timeout=180,
+            )
+        except EdaAgentError:
+            return []
+        objects = payload.get("objects") if isinstance(payload, dict) else None
+        bodies: list[dict[str, Any]] = []
+        for obj in objects or []:
+            if not isinstance(obj, dict):
+                continue
+            x1 = mm(obj.get("BoundsLeft"))
+            y1 = mm(obj.get("BoundsBottom"))
+            x2 = mm(obj.get("BoundsRight"))
+            y2 = mm(obj.get("BoundsTop"))
+            if abs(x2 - x1) < 1e-6 or abs(y2 - y1) < 1e-6:
+                continue
+            bodies.append(
+                {
+                    "x1": min(x1, x2),
+                    "y1": min(y1, y2),
+                    "x2": max(x1, x2),
+                    "y2": max(y1, y2),
+                    "layer": str(obj.get("Layer") or ""),
+                }
+            )
+        return bodies
+
     def mount_pads(self, board_path: str = "",
                    min_hole_mils: float = 55.0) -> list[dict[str, Any]]:
         """读取板上的自由焊盘中的安装孔 / 安装焊盘。
@@ -562,58 +599,6 @@ class EdaAgentSession:
     def _filter_cutouts(cutouts: list[dict], outline: list[tuple[float, float]], board) -> list[dict]:
         """剔除「板框本身」和「器件封装（含磁芯）内的挖空」，只留板级避距槽。"""
         return filter_cutouts(cutouts, outline, board)
-
-    def board_outline(self, board_path: str = "", arc_step_deg: float = 6.0) -> list[tuple[float, float]]:
-        """读取板框外形（line + arc），圆弧按角度离散成多边形，单位 mm。"""
-        if board_path:
-            try:
-                self.focus_board(board_path)
-            except EdaAgentError:
-                pass
-        try:
-            payload = self._call("pcb_get_board_outline", {}, timeout=120)
-        except EdaAgentError:
-            return []
-        vertices = payload.get("vertices") if isinstance(payload, dict) else None
-        if not vertices:
-            return []
-
-        points: list[list[tuple[float, float]]] = []
-        for index, vertex in enumerate(vertices):
-            x = mm(vertex.get("x"))
-            y = mm(vertex.get("y"))
-            if vertex.get("kind") != "arc":
-                points.append([(x, y)])
-                continue
-            # 圆弧：从当前顶点画到下一个顶点，圆心与起止角由 AD 给出
-            nxt = vertices[(index + 1) % len(vertices)]
-            nx, ny = mm(nxt.get("x")), mm(nxt.get("y"))
-            cx, cy = mm(vertex.get("cx")), mm(vertex.get("cy"))
-            radius = math.hypot(x - cx, y - cy)
-            if radius < 1e-6:
-                points.append([(x, y)])
-                continue
-            start = math.degrees(math.atan2(y - cy, x - cx))
-            end = math.degrees(math.atan2(ny - cy, nx - cx))
-            sweep = (end - start) % 360.0
-            steps = max(1, int(round(sweep / arc_step_deg)))
-            samples = [
-                (
-                    cx + radius * math.cos(math.radians(start + sweep * i / steps)),
-                    cy + radius * math.sin(math.radians(start + sweep * i / steps)),
-                )
-                for i in range(steps + 1)
-            ]
-            points.append(samples)
-
-        outline: list[tuple[float, float]] = []
-        for segment in points:
-            for point in segment:
-                if not outline or math.hypot(
-                    point[0] - outline[-1][0], point[1] - outline[-1][1]
-                ) > 1e-4:
-                    outline.append(point)
-        return outline
 
     def board_cutouts(self, board_path: str = "") -> list[dict[str, Any]]:
         """读取板级挖空（eRegionObject 且 Kind=board_cutout）。"""
@@ -818,6 +803,8 @@ class EdaAgentSession:
         with_shapes: bool = False,
         with_netlist: bool = True,
         with_sheets: bool = True,
+        with_cutout_outlines: bool = True,
+        with_bodies: bool = True,
         with_mounts: bool = True,
         progress: Callable[[str, str], None] | None = None,
         should_stop: Callable[[], bool] | None = None,
@@ -885,6 +872,8 @@ class EdaAgentSession:
             )
         report.component_count = len(board.components)
         report.steps.append(f"读取器件 {len(board.components)} 个")
+        bodies = sum(1 for comp in board.components.values() if getattr(comp, "bbox", None))
+        report.steps.append(f"读取器件本体外形（含 3D 外形投影）{bodies} 个")
         if stopped():
             raise EdaAgentError("扫描已取消")
 
@@ -947,15 +936,16 @@ class EdaAgentSession:
             board.pads = kept
             report.mount_pads.extend(self.mount_pads(board_path))
 
-            # 板级挖空：圆形 → 安装孔；多边形 → 避距槽（区分电气间隙 / 爬电距离）
-            report_progress("挖空", "读取板级挖空（圆形 / 避距槽）…")
-            outline = self.board_outline(board_path)
-            board.outline = outline
+            # 板框已改为从 HTML 记录导入（见「布局视图 → 导入板框HTML…」），
+            # 这里不再调用 pcb_get_board_outline，扫描只取挖空。
+            outline = list(board.outline or [])
             if len(outline) >= 3:
                 x0, y0, x1, y1 = board.board_bbox()
                 report.steps.append(
-                    f"读取板框外形 {len(outline)} 点（{x1 - x0:.2f} × {y1 - y0:.2f} mm）"
+                    f"板框沿用已导入外形 {len(outline)} 点"
+                    f"（{x1 - x0:.2f} × {y1 - y0:.2f} mm）"
                 )
+            report_progress("挖空", "读取板级挖空（圆形 / 避距槽）…")
 
             cutouts = self.board_cutouts(board_path)
             if cutouts:
@@ -988,7 +978,7 @@ class EdaAgentSession:
 
                 # 爬电隔离槽：读一次整板铜箔，取每条槽的闭合端点用于精确绘制
                 creepage = [item for item in cutouts if item.get("role") == "creepage"]
-                if creepage:
+                if creepage and with_cutout_outlines:
                     report_progress("挖空轮廓", "读取挖空闭合端点（约 20~30 秒）…")
                     for outline_item in self.cutout_outlines(board_path):
                         target = self.match_outline(creepage, outline_item)
@@ -1081,6 +1071,15 @@ class EdaAgentSession:
         for comp in board.components.values():
             comp.pad_count = len(board.pads_of_component(comp.designator))
 
+        if with_bodies and not stopped():
+            report_progress("3D本体", "读取器件 3D 本体（机械层）…")
+            bodies = self.component_bodies()
+            matched = attach_bodies(board, bodies)
+            if bodies:
+                report.steps.append(
+                    f"读取 3D 本体 {len(bodies)} 个，匹配到器件 {matched} 个"
+                )
+
         if with_netlist and not stopped():
             report_progress("网表", "读取原理图编译网表（引脚名用于拓扑推断）…")
             report.pins = self.netlist_pins()
@@ -1105,6 +1104,193 @@ class EdaAgentSession:
         report.steps.append(f"提取网络 {report.net_count} 个")
         report_progress("完成", f"器件 {report.component_count} / 焊盘 {report.pad_count} / 网络 {report.net_count}")
         return board, report
+
+
+def attach_bodies(board, bodies: list[dict]) -> int:
+    """把 3D 本体外框归到所属器件（按几何做全局匹配）。
+
+    ComponentBody 没有位号（SourceDesignator 为空），只能靠几何归属：
+
+    1. 先按外框去重（同一本体可能被枚举两次）；
+    2. 本体 ↔ 器件占位外框（焊盘整体 +0.5 mm）算 IoU，按分数从高到低
+       **一对一**贪心配对，避免“小器件的本体被邻居抢走”；
+    3. 仍然没配上的器件，再看有没有「本体包含器件中心且体积不大」的，
+       有就取面积最小的那个。
+
+    返回成功归属的器件数。
+    """
+    if not bodies or not board.components:
+        return 0
+
+    unique: dict[tuple[float, float, float, float], dict] = {}
+    for body in bodies:
+        key = (
+            round(body["x1"], 2),
+            round(body["y1"], 2),
+            round(body["x2"], 2),
+            round(body["y2"], 2),
+        )
+        if key not in unique:
+            unique[key] = body
+    body_list = list(unique.values())
+
+    extents: dict[str, tuple[float, float, float, float]] = {}
+    for designator, comp in board.components.items():
+        pads = board.pads_of_component(designator)
+        if pads:
+            radius = [max(pad.width, pad.height) / 2 for pad in pads]
+            extents[designator] = (
+                min(pad.x - r for pad, r in zip(pads, radius)) - 0.5,
+                min(pad.y - r for pad, r in zip(pads, radius)) - 0.5,
+                max(pad.x + r for pad, r in zip(pads, radius)) + 0.5,
+                max(pad.y + r for pad, r in zip(pads, radius)) + 0.5,
+            )
+        elif comp.bbox:
+            x1, y1, x2, y2 = comp.bbox
+            extents[designator] = (x1 - 0.5, y1 - 0.5, x2 + 0.5, y2 + 0.5)
+
+    def area(box) -> float:
+        return max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1])
+
+    def iou(a, b) -> float:
+        ix = min(a[2], b[2]) - max(a[0], b[0])
+        iy = min(a[3], b[3]) - max(a[1], b[1])
+        if ix <= 0 or iy <= 0:
+            return 0.0
+        inter = ix * iy
+        return inter / max(area(a) + area(b) - inter, 1e-9)
+
+    def plausible(box, designator) -> bool:
+        """本体不能明显“长出”器件自己的外框。
+
+        R105 是 0805，却匹配到一个 3.2 × 2.5 的本体（比器件大一倍还伸到
+        隔壁），就是这条没约束导致的误判。
+        """
+        comp = board.components.get(designator)
+        bbox = getattr(comp, "bbox", None) if comp is not None else None
+        if not bbox:
+            return True
+        tolerance = 0.5
+        return (
+            box[0] >= bbox[0] - tolerance
+            and box[1] >= bbox[1] - tolerance
+            and box[2] <= bbox[2] + tolerance
+            and box[3] <= bbox[3] + tolerance
+        )
+
+    def size_bonus(box, designator) -> float:
+        """本体尺寸与器件自身外框（Altium 的 bounding rect）的接近程度。
+
+        L2(XAL4020, 4.06×4.05) 与 Copper1(3.60×3.60) 位置几乎重合，
+        只靠 IoU 分不出来，但比较尺寸就能分：4.0×3.96 属于 L2，
+        3.4×3.4 属于 Copper1。
+        """
+        comp = board.components.get(designator)
+        bbox = getattr(comp, "bbox", None) if comp is not None else None
+        if not bbox:
+            return 0.0
+        width = bbox[2] - bbox[0]
+        height = bbox[3] - bbox[1]
+        if width <= 0 or height <= 0:
+            return 0.0
+        body_w = box[2] - box[0]
+        body_h = box[3] - box[1]
+        error = (abs(body_w - width) + abs(body_h - height)) / (width + height)
+        return max(0.0, 1.0 - error)
+
+    def score_of(box, designator) -> float:
+        return iou(box, extents[designator]) + 0.6 * size_bonus(box, designator)
+
+    scored: list[tuple[float, int, str]] = []
+    for index, body in enumerate(body_list):
+        box = (body["x1"], body["y1"], body["x2"], body["y2"])
+        body_area = area(box)
+        if body_area <= 0:
+            continue
+        for designator, extent in extents.items():
+            if body_area > 6.0 * max(area(extent), 1e-6):
+                continue
+            if not plausible(box, designator):
+                continue
+            score = iou(box, extent)
+            if score >= 0.10:
+                scored.append((score_of(box, designator), index, designator))
+
+    scored.sort(reverse=True)
+    used_bodies: set[int] = set()
+    assigned: dict[str, tuple[float, tuple[float, float, float, float]]] = {}
+    for score, index, designator in scored:
+        if index in used_bodies or designator in assigned:
+            continue
+        body = body_list[index]
+        assigned[designator] = (score, (body["x1"], body["y1"], body["x2"], body["y2"]))
+        used_bodies.add(index)
+
+    # 兜底：本体包住器件中心、且体积不大 → 取最小那个
+    remaining = [d for d in extents if d not in assigned]
+    if remaining:
+        for index, body in enumerate(body_list):
+            if index in used_bodies:
+                continue
+            box = (body["x1"], body["y1"], body["x2"], body["y2"])
+            body_area = area(box)
+            if body_area <= 0:
+                continue
+            for designator in list(remaining):
+                extent = extents[designator]
+                cx = (extent[0] + extent[2]) / 2
+                cy = (extent[1] + extent[3]) / 2
+                if not (box[0] <= cx <= box[2] and box[1] <= cy <= box[3]):
+                    continue
+                if body_area > 6.0 * max(area(extent), 1e-6):
+                    continue
+                if not plausible(box, designator):
+                    continue
+                previous = assigned.get(designator)
+                if previous is None or body_area < area(previous[1]):
+                    assigned[designator] = (0.0, box)
+                    used_bodies.add(index)
+                    remaining.remove(designator)
+                    break
+
+    # 2-opt 修正：两个器件挨得很近时，贪心容易把彼此的本体换位
+    # （实测 L2 与 Copper1 就互换了）。这里对“占位框相交”的器件对做交换检验，
+    # 交换后总 IoU 变大就换。
+    matched_index: dict[str, int] = {}
+    for index, body in enumerate(body_list):
+        box = (body["x1"], body["y1"], body["x2"], body["y2"])
+        for designator, (_score, assigned_box) in assigned.items():
+            if assigned_box == box:
+                matched_index[designator] = index
+                break
+
+    def overlap(a, b) -> bool:
+        return not (a[2] < b[0] or b[2] < a[0] or a[3] < b[1] or b[3] < a[1])
+
+    for _ in range(3):
+        improved = False
+        owners = list(matched_index)
+        for i, name_a in enumerate(owners):
+            for name_b in owners[i + 1:]:
+                extent_a, extent_b = extents.get(name_a), extents.get(name_b)
+                if not extent_a or not extent_b or not overlap(extent_a, extent_b):
+                    continue
+                box_a = assigned[name_a][1]
+                box_b = assigned[name_b][1]
+                current = score_of(box_a, name_a) + score_of(box_b, name_b)
+                swapped = score_of(box_b, name_a) + score_of(box_a, name_b)
+                if swapped > current + 1e-6:
+                    assigned[name_a] = (0.0, box_b)
+                    assigned[name_b] = (0.0, box_a)
+                    idx_a, idx_b = matched_index[name_a], matched_index[name_b]
+                    matched_index[name_a], matched_index[name_b] = idx_b, idx_a
+                    improved = True
+        if not improved:
+            break
+
+    for designator, (_score, box) in assigned.items():
+        board.components[designator].body_bbox = box
+    return len(assigned)
 
 
 def _bulk_items(payload: Any) -> list[Any]:
@@ -1160,3 +1346,106 @@ def _map_shape(shape: str) -> str:
 
 def default_agent_root() -> Path:
     return Path(os.environ.get("EDA_AGENT_ROOT", r"E:\AI_model\eda-agent-0.8.1"))
+
+
+def discretize_outline(
+    vertices: list[dict], arc_step_deg: float = 6.0
+) -> list[tuple[float, float]]:
+    """把 line + arc 顶点离散成闭合多边形（mm）。
+
+    弧段方向不能简单按 ``(end - start) % 360`` 取——Altium 的弧可能顺时针，
+    那样一个 90° 圆角会被画成 270°，看上去像多出半个圆。这里用「就近原则」：
+    两种绕向各采一个中点，落在板内（参考多边形）的那个才是真正的弧；
+    都判断不了就取较小的一段（板框圆角通常 ≤ 180°）。
+    """
+    if not vertices:
+        return []
+
+    # 参考多边形：所有顶点（含弧端点）按顺序连起来，用来判断弧中点在不在板内
+    anchor = [(item["x"], item["y"]) for item in vertices]
+
+    points: list[list[tuple[float, float]]] = []
+    for index, vertex in enumerate(vertices):
+        x, y = vertex["x"], vertex["y"]
+        if vertex.get("kind") != "arc":
+            points.append([(x, y)])
+            continue
+
+        nxt = vertices[(index + 1) % len(vertices)]
+        nx, ny = nxt["x"], nxt["y"]
+        cx, cy = vertex.get("cx", 0.0), vertex.get("cy", 0.0)
+        radius = math.hypot(x - cx, y - cy)
+        if radius < 1e-6:
+            points.append([(x, y)])
+            continue
+
+        start = math.degrees(math.atan2(y - cy, x - cx))
+        end = math.degrees(math.atan2(ny - cy, nx - cx))
+        ccw = (end - start) % 360.0
+        candidates = [ccw, 360.0 - ccw] if ccw > 1e-9 else [0.0]
+        target = _ad_span(vertex)
+        if target is None:
+            sweep = _pick_sweep(cx, cy, radius, start, candidates, anchor)
+        else:
+            # 取与 AD 起止角跨度最接近的那个候选方向
+            sweep = min(candidates, key=lambda value: abs(value - target))
+
+        steps = max(1, int(round(abs(sweep) / max(arc_step_deg, 0.5))))
+        samples = [
+            (
+                cx + radius * math.cos(math.radians(start + sweep * i / steps)),
+                cy + radius * math.sin(math.radians(start + sweep * i / steps)),
+            )
+            for i in range(steps + 1)
+        ]
+        points.append(samples)
+
+    outline: list[tuple[float, float]] = []
+    for segment in points:
+        for point in segment:
+            if not outline or math.hypot(
+                point[0] - outline[-1][0], point[1] - outline[-1][1]
+            ) > 1e-4:
+                outline.append(point)
+    return outline
+
+
+def _ad_span(vertex: dict) -> float | None:
+    """Altium 给出的弧跨度（0~180），没有就返回 None。
+
+    AD 的 angle1 / angle2 有时按“起点→终点”，有时反过来，但两点之间的
+    最短夹角始终等于真实弧长，用它来校正方向最稳。
+    """
+    try:
+        first = float(vertex.get("angle1"))
+        second = float(vertex.get("angle2"))
+    except (TypeError, ValueError):
+        return None
+    span = abs(((second - first + 180.0) % 360.0) - 180.0)
+    if span <= 1e-6:
+        return None
+    return span
+
+
+def _pick_sweep(
+    cx: float,
+    cy: float,
+    radius: float,
+    start: float,
+    candidates: list[float],
+    anchor: list[tuple[float, float]],
+) -> float:
+    """在候选绕向里挑出真正的弧段（优先取中点在板内的那段）。"""
+    from ..geometry import point_in_polygon_any
+
+    def midpoint(sweep_value: float) -> tuple[float, float]:
+        angle = math.radians(start + sweep_value / 2.0)
+        return (cx + radius * math.cos(angle), cy + radius * math.sin(angle))
+
+    usable = len(anchor) >= 3
+    if usable:
+        inside = [value for value in candidates
+                  if point_in_polygon_any(midpoint(value), anchor)]
+        if len(inside) == 1:
+            return inside[0]
+    return min(candidates)

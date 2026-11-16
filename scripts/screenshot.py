@@ -148,7 +148,10 @@ def main() -> int:
 
     window.tabs.setCurrentWidget(window.violation_panel)
     shot("shot_violations.png")
-    window.tabs.setCurrentWidget(window.board_view.parentWidget())
+    for index in range(window.tabs.count()):
+        if window.tabs.tabText(index) == "布局视图":
+            window.tabs.setCurrentIndex(index)
+            break
     shot("shot_board.png")
     return 0
 

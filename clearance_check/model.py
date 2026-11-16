@@ -112,6 +112,8 @@ class Component:
     bbox: tuple[float, float, float, float] | None = None
     #: 类别：""=普通器件，"burn_terminal"=烧录端子（半孔，靠近板框不算违规）
     category: str = ""
+    #: 3D 本体（ComponentBody）投影外框 (x1, y1, x2, y2)，mm；没有 3D 体则为 None
+    body_bbox: tuple[float, float, float, float] | None = None
 
     @property
     def is_burn_terminal(self) -> bool:
@@ -254,8 +256,10 @@ class Board:
     mounts: list["MountPoint"] = field(default_factory=list)
     floating_parts: list["FloatingPart"] = field(default_factory=list)
     cutouts: list["BoardCutout"] = field(default_factory=list)
-    #: 板框外形多边形（mm），来自 PCB 板框对象，圆弧已离散
+    #: 板框外形多边形（mm），来自 PCB 板框对象 / HTML 记录，圆弧已离散
     outline: list[tuple[float, float]] = field(default_factory=list)
+    #: 板框解析版本：0/1 = 旧算法（弧向有误），2 = 按 SVG 规范解析
+    outline_version: int = 0
     warnings: list[str] = field(default_factory=list)
     source_path: str = ""
     source_format: str = ""

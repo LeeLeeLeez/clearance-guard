@@ -64,18 +64,30 @@ ROOT_FILES = (
     "README.md",
     ".gitignore",
     "app.py",
+    "server.py",
     "run.cmd",
+    "run-tk.cmd",
     "requirements.txt",
     "pyrightconfig.json",
+    "ClearanceGuard.spec",
     "上传到GitHub.cmd",
+    "创建快捷方式.cmd",
+    # ---- 前端（React + oink-ui）----
+    "web/package.json",
+    "web/package-lock.json",
+    "web/vite.config.ts",
+    "web/tsconfig.json",
+    "web/index.html",
 )
 
 # 递归收集的目录（只收这些后缀）
 INCLUDE_DIRS = {
     "clearance_check": (".py", ".qss"),
+    "api": (".py",),
     "tests": (".py",),
     "scripts": (".py",),
     "assets": (".svg", ".ico"),
+    "web/src": (".ts", ".tsx", ".css"),
 }
 
 # 任何路径命中这些规则都不上传（工程数据 / 构建产物 / 缓存）
@@ -84,13 +96,16 @@ EXCLUDE_GLOBS = (
     "*.pyc",
     ".pytest_cache/*",
     "json/*",            # 扫描快照含真实设计数据，绝不上传
-    "dev/*",             # 截图与调试输出
+    "dev/*",             # 截图与调试输出（本机 DLP 会把 PNG 加密，传上去也是乱码）
+    "backup/*",          # 优化前的工程备份，体积大且是本机快照
     ".venv/*",
     "venv/*",
     "dist/*",
     "build/*",
     "*.log",
     "scripts/_*.py",     # 一次性补丁脚本
+    "web/node_modules/*",
+    "web/dist/*",
 )
 
 DESCRIPTION = (
@@ -98,8 +113,9 @@ DESCRIPTION = (
     "auto-classifies nets (primary constant / primary switching / secondary), "
     "tracks reference grounds, reads board cutouts (slots separate 6 mm "
     "electrical clearance from 8 mm creepage), and reports pad-pair distances "
-    "with measured vs required gaps. Python + PySide6, driven live over the "
-    "EDA Agent bridge."
+    "with measured vs required gaps. Web UI (React 18 + oink-ui) on a local "
+    "Python-standard-library backend, driven live over the EDA Agent bridge; "
+    "the legacy PySide6 UI is kept as a fallback."
 )
 
 

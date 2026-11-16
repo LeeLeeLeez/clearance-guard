@@ -181,6 +181,23 @@ def point_in_polygon(p: Point, poly: Polygon) -> bool:
     return True
 
 
+def point_in_polygon_any(p: Point, poly: Polygon) -> bool:
+    """任意多边形（含凹形）内部判定，射线法。边界上视为外部。"""
+    if len(poly) < 3:
+        return False
+    x, y = p
+    inside = False
+    count = len(poly)
+    for index in range(count):
+        x1, y1 = poly[index]
+        x2, y2 = poly[(index + 1) % count]
+        if (y1 > y) != (y2 > y):
+            x_cross = x1 + (y - y1) * (x2 - x1) / (y2 - y1)
+            if x < x_cross:
+                inside = not inside
+    return inside
+
+
 def polygon_distance(poly_a: Polygon, poly_b: Polygon) -> float:
     """两个多边形之间的最小距离，相交或包含返回 0。"""
     if not poly_a or not poly_b:

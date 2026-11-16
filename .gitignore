@@ -3,3 +3,7 @@ __pycache__/
 .pytest_cache/
 dev/*.json
 dev/shot_live.png
+backup/
+build/
+dist/
+*.spec.bak

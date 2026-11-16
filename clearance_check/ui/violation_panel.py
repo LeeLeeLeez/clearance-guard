@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import csv
 
 from PySide6.QtCore import Qt, Signal
@@ -10,7 +12,6 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QComboBox,
-    QDoubleSpinBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -45,22 +46,41 @@ _PAD_COLUMNS = [
 
 
 def _card(title: str, value: str, color: str = ACCENT) -> tuple[QFrame, QLabel]:
+    """紧凑指标：标题与数值同一行，高度压到最小。"""
     frame = QFrame()
     frame.setObjectName("Card")
-    layout = QVBoxLayout(frame)
-    layout.setContentsMargins(14, 10, 14, 10)
-    layout.setSpacing(2)
+    frame.setMaximumHeight(34)
+    layout = QHBoxLayout(frame)
+    layout.setContentsMargins(10, 2, 10, 2)
+    layout.setSpacing(8)
     caption = QLabel(title)
     caption.setObjectName("CardTitle")
     number = QLabel(value)
     number.setObjectName("CardValue")
-    number.setStyleSheet(f"color: {color}; font-size: 22px; font-weight: 700;")
+    number.setStyleSheet(f"color: {color}; font-size: 16px; font-weight: 700;")
     layout.addWidget(caption)
+    layout.addStretch(1)
     layout.addWidget(number)
     return frame, number
 
 
+def _rule_key(name: str) -> str:
+    """规则名去掉具体数值，便于归成一类。"""
+    text = re.sub(r"\d+(?:\.\d+)?", "#", name)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _rule_label(name: str) -> str:
+    """下拉里展示的短名：取第一个数字之前的部分，去掉尾部的括号/标点。"""
+    match = re.search(r"\d", name)
+    prefix = name[: match.start()] if match else name
+    prefix = prefix.strip(" （(·、,，:：")
+    prefix = re.sub(r"\s+", " ", prefix).strip()
+    return prefix if len(prefix) >= 2 else name.strip()
+
+
 class ViolationPanel(QWidget):
+    MAX_ROWS = 800  # 表格最多铺这么多行，超出只统计不铺行
     locateRequested = Signal(str)
     violationSelected = Signal(int)
 
@@ -75,27 +95,17 @@ class ViolationPanel(QWidget):
 
         # ---- 统计卡片 ---------------------------------------------
         cards = QHBoxLayout()
-        cards.setSpacing(10)
+        cards.setSpacing(8)
         frame_pairs, self.value_pairs = _card("违规器件对", "0", DANGER)
-        frame_pads, self.value_pads = _card("焊盘级违规", "0", WARN)
         frame_deficit, self.value_deficit = _card("最大缺口", "0.00 mm", DANGER)
-        frame_nets, self.value_nets = _card("涉及网络", "0", ACCENT)
-        for frame in (frame_pairs, frame_pads, frame_deficit, frame_nets):
-            cards.addWidget(frame, 1)
+        cards.addWidget(frame_pairs, 1)
+        cards.addWidget(frame_deficit, 1)
+        cards.addStretch(1)
         layout.addLayout(cards)
 
         # ---- 过滤 / 操作 -------------------------------------------
         toolbar = QHBoxLayout()
         toolbar.setSpacing(8)
-        toolbar.addWidget(QLabel("最小缺口"))
-        self.min_deficit = QDoubleSpinBox()
-        self.min_deficit.setRange(0.0, 50.0)
-        self.min_deficit.setDecimals(2)
-        self.min_deficit.setSingleStep(0.05)
-        self.min_deficit.setSuffix(" mm")
-        self.min_deficit.setFixedWidth(110)
-        toolbar.addWidget(self.min_deficit)
-
         self.isolation_only = QCheckBox("只看隔离带（原边↔副边）")
         toolbar.addWidget(self.isolation_only)
 
@@ -106,6 +116,13 @@ class ViolationPanel(QWidget):
         self.severity_filter.addItem("仅 WARNING（器件内）", "warning")
         self.severity_filter.setFixedWidth(170)
         toolbar.addWidget(self.severity_filter)
+
+        toolbar.addWidget(QLabel("违规项"))
+        self.rule_filter = QComboBox()
+        self.rule_filter.addItem("全部违规项", "")
+        self.rule_filter.setFixedWidth(220)
+        self.rule_filter.setToolTip("按依据规则过滤，例如「焊盘距板框」「隔离带爬电距离」")
+        toolbar.addWidget(self.rule_filter)
         toolbar.addStretch(1)
 
         self.btn_locate = QPushButton("在 Altium 中定位")
@@ -128,8 +145,8 @@ class ViolationPanel(QWidget):
         self.placeholder.setObjectName("Hint")
         layout.addWidget(self.placeholder)
 
-        self.min_deficit.valueChanged.connect(lambda _: self._rebuild())
         self.severity_filter.currentIndexChanged.connect(lambda _: self._rebuild())
+        self.rule_filter.currentIndexChanged.connect(lambda _: self._rebuild())
         self.isolation_only.toggled.connect(lambda _: self._rebuild())
         self.btn_export.clicked.connect(self._export_csv)
         self.btn_locate.clicked.connect(self._locate_current)
@@ -173,21 +190,43 @@ class ViolationPanel(QWidget):
     ) -> None:
         self._violations = violations
         self._aggregated = aggregated
+        self._refresh_rule_filter(violations)
         self.value_pairs.setText(str(len(aggregated)))
-        self.value_pads.setText(str(len(violations)))
         max_deficit = max((v.deficit_mm for v in violations), default=0.0)
         self.value_deficit.setText(f"{max_deficit:.2f} mm")
-        self.value_nets.setText(str(len({v.net_a for v in violations} | {v.net_b for v in violations})))
         self.placeholder.setVisible(not violations)
         self._rebuild()
         if current >= 0:
             self.select_pad_violation(current)
 
+    def _refresh_rule_filter(self, violations: list[Violation]) -> None:
+        """按规则名归类（去掉具体数值），例如「焊盘距板框 0.4 mm」→「焊盘距板框」"""
+        current = self.rule_filter.currentData() or ""
+        labels: dict[str, str] = {}
+        for item in violations:
+            raw_name = str(getattr(item, "rule_name", "") or "")
+            if not raw_name:
+                continue
+            key = _rule_key(raw_name)
+            if not key:
+                continue
+            labels.setdefault(key, _rule_label(raw_name))
+
+        self.rule_filter.blockSignals(True)
+        self.rule_filter.clear()
+        self.rule_filter.addItem("全部违规项", "")
+        for key in sorted(labels):
+            self.rule_filter.addItem(labels[key], key)
+        index = self.rule_filter.findData(current)
+        self.rule_filter.setCurrentIndex(max(index, 0))
+        self.rule_filter.blockSignals(False)
+
     def clear(self) -> None:
         self.set_results([], [])
 
     def _passes(self, violation: Violation | ComponentViolation) -> bool:
-        if violation.deficit_mm < self.min_deficit.value() - 1e-9:
+        wanted_rule = self.rule_filter.currentData()
+        if wanted_rule and _rule_key(getattr(violation, "rule_name", "")) != wanted_rule:
             return False
         wanted = self.severity_filter.currentData()
         if wanted and violation.severity != wanted:
@@ -200,8 +239,18 @@ class ViolationPanel(QWidget):
         return True
 
     def _rebuild(self) -> None:
-        devices = [item for item in self._aggregated if self._passes(item)]
-        pads = [item for item in self._violations if self._passes(item)]
+        devices_all = [item for item in self._aggregated if self._passes(item)]
+        pads_all = [item for item in self._violations if self._passes(item)]
+        # 上万行 QTableWidget 会让界面像卡死，这里只铺前 MAX_ROWS 行；
+        # 卡片里仍然显示过滤后的真实条数。
+        devices = devices_all[: self.MAX_ROWS]
+        pads = pads_all[: self.MAX_ROWS]
+        self.value_pairs.setText(str(len(devices_all)))
+        self.value_pairs.setToolTip(
+            f"共 {len(devices_all)} 对；表格最多展示 {self.MAX_ROWS} 行"
+            if len(devices_all) > self.MAX_ROWS
+            else f"共 {len(devices_all)} 对"
+        )
 
         self.device_table.setRowCount(len(devices))
         bold = QFont()
@@ -267,7 +316,6 @@ class ViolationPanel(QWidget):
             self.placeholder.setVisible(True)
         else:
             self.placeholder.setVisible(False)
-        self.value_pairs.setText(str(len(devices)))
 
     # ---- 选中 / 定位 ----------------------------------------------
     def current_device(self) -> ComponentViolation | None:

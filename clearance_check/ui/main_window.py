@@ -5,20 +5,24 @@ from __future__ import annotations
 import copy
 import functools
 import time
+import json
 import os
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QThread, Qt, Signal
+from PySide6.QtCore import QThread, Qt, Signal, QTimer
 from PySide6.QtGui import QFont, QIcon
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -26,6 +30,9 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSizePolicy,
+    QSplitter,
+    QTableWidget,
+    QTableWidgetItem,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -53,6 +60,10 @@ from ..snapshot import (
     save_snapshot,
 )
 from ..eda.session import ConnectionState, EdaAgentError, EdaAgentSession, LiveProject
+from ..outline_html import load_outline_html
+
+OUTLINE_VERSION = 2  # 板框解析算法版本（SVG 规范弧段）
+
 from ..model import (
     Board,
     BoardCutout,
@@ -110,6 +121,24 @@ class Worker(QThread):
             self.succeeded.emit(result)
 
 
+def _log_import(message: str) -> None:
+    """导入快照的排错日志（打包后无控制台，只能落文件）。"""
+    try:
+        directory = Path(os.environ.get("APPDATA", str(Path.home()))) / "ClearanceGuard"
+        directory.mkdir(parents=True, exist_ok=True)
+        with (directory / "import_log.txt").open("a", encoding="utf-8") as handle:
+            handle.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}\n")
+    except OSError:
+        pass
+
+
+def _project_root() -> Path:
+    """exe 运行时用 exe 所在目录，源码运行时用工程根目录。"""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent
+    return Path(__file__).resolve().parents[2]
+
+
 class MainWindow(QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -145,6 +174,8 @@ class MainWindow(QMainWindow):
         self._restore_rules()
         self._update_connection_badge(ConnectionState.DISCONNECTED)
         self._restore_last_snapshot()
+        self._start_pcb_watch()
+        self._update_pcb_button_state()
 
     # ------------------------------------------------------------------
     # 界面搭建
@@ -225,7 +256,7 @@ class MainWindow(QMainWindow):
     def _build_header(self) -> QWidget:
         header = QFrame()
         header.setObjectName("Header")
-        header.setFixedHeight(72)
+        header.setFixedHeight(84)
         layout = QHBoxLayout(header)
         layout.setContentsMargins(18, 10, 18, 10)
         layout.setSpacing(12)
@@ -270,17 +301,32 @@ class MainWindow(QMainWindow):
         self.btn_open.clicked.connect(self._open_project)
         layout.addWidget(self.btn_open)
 
-        self.btn_demo = QPushButton("示例工程")
-        self.btn_demo.setObjectName("Ghost")
-        self.btn_demo.clicked.connect(self._load_demo)
-        layout.addWidget(self.btn_demo)
-
         self.btn_scan = QPushButton("扫描工程")
         self.btn_scan.setObjectName("Primary")
+        self.btn_scan.setToolTip("读取整个工程：PCB + 原理图网表 + 图纸归属（大板 1~2 分钟）")
         self.btn_scan.clicked.connect(self._scan)
         layout.addWidget(self.btn_scan)
 
+        scan_box = QVBoxLayout()
+        scan_box.setSpacing(4)
+        self.btn_scan_pcb = QPushButton("扫描pcb")
+        self.btn_scan_pcb.setObjectName("Primary")
+        self.btn_scan_pcb.setMinimumHeight(30)
+        self.btn_scan_pcb.setEnabled(False)
+        self.btn_scan_pcb.setToolTip("只重读 PCB（器件/焊盘/挖空），跳过原理图网表与图纸")
+        self.btn_scan_pcb.clicked.connect(self._scan_pcb)
+        scan_box.addWidget(self.btn_scan_pcb)
+        layout.addLayout(scan_box)
+
         return header
+
+    def _start_pcb_watch(self) -> None:
+        """定时检查 PCB 修改时间，决定「扫描pcb」是否可用。"""
+        if getattr(self, "_pcb_timer", None) is None:
+            self._pcb_timer = QTimer(self)
+            self._pcb_timer.setInterval(4000)
+            self._pcb_timer.timeout.connect(self._update_pcb_button_state)
+            self._pcb_timer.start()
 
     def _on_component_category_changed(self) -> None:
         self._append_log("器件类别已修改，正在重新校验（烧录端子豁免板框间距）…")
@@ -309,6 +355,38 @@ class MainWindow(QMainWindow):
         if self.violations or self._baseline_snapshot is not None or self.classifications:
             self._start_clearance()
 
+    def _apply_baseline_cutout_roles(self, board: Board) -> int:
+        """扫描后把配置基线里的挖空归属套到本次扫描到的挖空上。
+
+        按「中心 ±1 mm、尺寸 ±1 mm」求交集：能对上的就沿用手工归属
+        （板框外形 / 器件封装 / 爬电隔离），对不上的仍走自动判定。
+        """
+        baseline = self._baseline_snapshot
+        if baseline is None or getattr(baseline, "board", None) is None:
+            return 0
+        old_cutouts = [cut for cut in baseline.board.cutouts if cut.role]
+        if not old_cutouts:
+            return 0
+
+        matched = 0
+        for cut in board.cutouts:
+            for old in old_cutouts:
+                if (
+                    abs(cut.x - old.x) <= 1.0
+                    and abs(cut.y - old.y) <= 1.0
+                    and abs(cut.width - old.width) <= 1.0
+                    and abs(cut.height - old.height) <= 1.0
+                ):
+                    if cut.role != old.role:
+                        cut.role = old.role
+                        matched += 1
+                    break
+        if matched:
+            self._append_log(
+                f"按配置基线沿用 {matched} 个挖空归属（{self._baseline_name or '上次快照'}）"
+            )
+        return matched
+
     def _sanitize_board_geometry(self, board: Board) -> None:
         """过滤非避距槽挖空；板框缺失时用「板框挖空」外框兜底。
 
@@ -327,6 +405,8 @@ class MainWindow(QMainWindow):
                 guessed += 1
         if guessed:
             self._append_log(f"按注释/封装识别器件类别 {guessed} 个（如烧录端子）")
+
+        self._refresh_stale_outline(board)
 
         cutouts = list(board.cutouts)
         if not cutouts:
@@ -483,7 +563,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(head)
 
         self.info_label = QLabel(
-            "尚未扫描任何工程。点击右上角「连接 Altium」读取已打开的工程，或点击「示例工程」体验完整流程。"
+            "尚未扫描任何工程。点击右上角「连接 Altium」读取已打开的工程。"
         )
         self.info_label.setWordWrap(True)
         self.info_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -527,12 +607,34 @@ class MainWindow(QMainWindow):
         self.chk_warning.setToolTip("同一器件内部焊盘的违规（黄）")
         fit = QPushButton("适应窗口")
         fit.setObjectName("Ghost")
+        self.btn_import_outline = QPushButton("导入板框HTML…")
+        self.btn_import_outline.setObjectName("Ghost")
+        self.btn_import_outline.setToolTip(
+            "从板框记录 HTML 读取 SVG 外形（不再调用 eda-agent 的板框接口）"
+        )
+        self.btn_import_outline.clicked.connect(self._import_outline_html)
+        self.btn_select_area = QPushButton("求解框")
+        self.btn_select_area.setToolTip("点击后在画布上拖拽出矩形选区，松开即固定选区")
+        self.btn_select_area.clicked.connect(self._start_area_select)
+        self.btn_solve = QPushButton("求解")
+        self.btn_solve.setEnabled(False)
+        # 必须先「求解框」并拖出选区，才允许求解；求解一次后立即失效
+        self._area_ready = False
+        self._area_rect = None
+        self._last_pcb_mtime: float | None = None
+        self.btn_solve.setToolTip(
+            "对已选定的矩形区域计算最小移动量方案（单器件位移上限 1 mm）"
+        )
+        self.btn_solve.clicked.connect(self._solve_area)
         for widget in (
             self.chk_labels,
             self.chk_top,
             self.chk_bottom,
             self.chk_error,
             self.chk_warning,
+            self.btn_import_outline,
+            self.btn_select_area,
+            self.btn_solve,
             fit,
         ):
             toolbar.addWidget(widget)
@@ -546,7 +648,31 @@ class MainWindow(QMainWindow):
         layout.addLayout(toolbar)
 
         self.board_view = BoardView()
-        layout.addWidget(self.board_view, 1)
+        self.board_view.areaSelected.connect(self._on_area_selected)
+
+        self.change_table = QTableWidget(0, 6)
+        self.change_table.setHorizontalHeaderLabels(
+            ["器件", "变更前位置 (mm)", "变更前旋转", "变更后位置 (mm)", "变更后旋转", "位移"]
+        )
+        self.change_table.verticalHeader().setVisible(False)
+        self.change_table.verticalHeader().setDefaultSectionSize(28)
+        self.change_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.change_table.setAlternatingRowColors(True)
+        head = self.change_table.horizontalHeader()
+        head.setSectionResizeMode(QHeaderView.Interactive)
+        head.setStretchLastSection(True)
+        for column, width in enumerate((66, 104, 68, 104, 68)):
+            self.change_table.setColumnWidth(column, width)
+
+        change_tabs = QTabWidget()
+        change_tabs.addTab(self.change_table, "变更详情")
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.addWidget(self.board_view)
+        splitter.addWidget(change_tabs)
+        splitter.setStretchFactor(0, 4)
+        splitter.setStretchFactor(1, 2)
+        splitter.setSizes([980, 430])
+        layout.addWidget(splitter, 1)
 
         fit.clicked.connect(self.board_view.fit_view)
         self.chk_error.toggled.connect(self._update_severity_filter)
@@ -559,6 +685,380 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # 连接与工程
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # 布局优化
+    # ------------------------------------------------------------------
+    def _import_outline_html(self) -> None:
+        """从 HTML 记录导入板框外形（替代 eda-agent 读取）。"""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "导入板框 HTML", "", "HTML 文件 (*.html *.htm);;所有文件 (*)"
+        )
+        if not path:
+            return
+        _log_import(f"开始导入板框 {path}")
+        self.status_label.setText("正在解析板框 HTML…")
+        self._append_log(f"读取板框 HTML：{Path(path).name}")
+        try:
+            self._import_outline_html_inner(path)
+        except Exception:  # noqa: BLE001 - 明细写日志并提示，避免“点了没反应”
+            import traceback
+
+            detail = traceback.format_exc()
+            _log_import("板框导入失败：" + detail)
+            QMessageBox.warning(
+                self, "导入板框失败", detail.strip().splitlines()[-1]
+            )
+
+    def _import_outline_html_inner(self, path: str) -> None:
+        _log_import(f"解析板框 HTML：{path}")
+        pad_bbox = None
+        pad_points = None
+        if self.board is not None and self.board.pads:
+            pad_bbox = self._outline_anchor_bbox()
+            # 取一部分焊盘做样本：用来判断朝向 + 把 HTML 的相对坐标摆到实际位置
+            pads = self.board.pads
+            step = max(1, len(pads) // 400)
+            pad_points = [(pad.x, pad.y) for pad in pads[::step]]
+        try:
+                        points = load_outline_html(path, pad_bbox, pad_points)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "导入板框失败", str(exc))
+            return
+
+        if self.board is None:
+            self._outline_pending = points
+            self._append_log(f"已读取板框 {len(points)} 点，扫描工程后自动套用")
+            return
+        # 先清掉旧板框，避免新旧两条外形叠在一起
+        self.board.outline = []
+        self.board.outline = points
+        self.board.outline_version = OUTLINE_VERSION
+        self._remember_outline_source(path)
+        self._sanitize_board_geometry(self.board)
+        self.slot_panel.set_cutouts(self.board.cutouts)
+        self.board_view.set_data(self.board, self.classifications, self.violations)
+        xs = [point[0] for point in points]
+        ys = [point[1] for point in points]
+        self._append_log(
+            f"已从 {Path(path).name} 导入板框：{len(points)} 点，"
+            f"范围 ({min(xs):.2f}, {min(ys):.2f}) ~ ({max(xs):.2f}, {max(ys):.2f}) mm"
+        )
+        _log_import(f"板框导入成功：{len(points)} 点")
+        self._auto_save_snapshot()
+        self.status_label.setText("板框已更新（来自 HTML），点「重新校验」刷新违规")
+
+    def _outline_source_file(self) -> Path:
+        base = Path(os.getenv("APPDATA", str(Path.home()))) / "ClearanceGuard"
+        return base / "outline_source.json"
+
+    def _remember_outline_source(self, path: str) -> None:
+        try:
+            target = self._outline_source_file()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps({"path": path}, ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            pass
+
+    def _saved_outline_source(self) -> str:
+        try:
+            data = json.loads(self._outline_source_file().read_text(encoding="utf-8"))
+            return str(data.get("path") or "")
+        except (OSError, ValueError):
+            return ""
+
+    def _refresh_stale_outline(self, board: Board) -> None:
+        """旧版本解析出来的板框（弧向错误）自动按新算法重算一次。
+
+        板框仍然“只在导入 HTML 时更新”，这里只是把同一条记录用修正后的
+        算法重新解析，避免用户看到旧形状必须手动再导一次。
+        """
+        if not board.outline or getattr(board, "outline_version", 0) >= OUTLINE_VERSION:
+            return
+        source = self._saved_outline_source()
+        if not source or not Path(source).is_file():
+            self._append_log(
+                "板框由旧版算法导入，形状可能不准；请重新导入一次板框 HTML"
+            )
+            if hasattr(self, "status_label"):
+                self.status_label.setText("板框为旧版解析结果，建议重新导入板框 HTML")
+            return
+        pads = board.pads
+        step = max(1, len(pads) // 400) if pads else 1
+        try:
+            points = load_outline_html(
+                source,
+                self._outline_anchor_bbox(),
+                [(pad.x, pad.y) for pad in pads[::step]] if pads else None,
+            )
+        except (OSError, ValueError) as exc:
+            self._append_log(f"板框自动修复失败：{exc}")
+            return
+        board.outline = list(points)
+        board.outline_version = OUTLINE_VERSION
+        self._append_log(
+            f"板框已按新算法从 {Path(source).name} 重新解析（{len(points)} 点）"
+        )
+
+    def _outline_anchor_bbox(self) -> tuple[float, float, float, float]:
+        """板框对齐目标：优先用「板框挖空」的外框，其次才用焊盘范围。
+
+        焊盘里可能散落着板外对象（夹具孔、备用焊盘），直接拿焊盘外框会把板框拉偏。
+        """
+        board = self.board
+        if board is None:
+            return (0.0, 0.0, 0.0, 0.0)
+        frame = None
+        for cut in board.cutouts:
+            if getattr(cut, "role", "") == "frame":
+                frame = cut
+                break
+        if frame is None and board.cutouts:
+            frame = max(board.cutouts, key=lambda c: c.width * c.height)
+        if frame is not None and frame.width > 0 and frame.height > 0:
+            return (
+                frame.x - frame.width / 2,
+                frame.y - frame.height / 2,
+                frame.x + frame.width / 2,
+                frame.y + frame.height / 2,
+            )
+        # 没有板框挖空时：用焊盘的 0.5%~99.5% 分位，剔除板外零星对象
+        pads = board.pads
+        if not pads:
+            return board.board_bbox()
+
+        def trimmed(values: list[float]) -> tuple[float, float]:
+            ordered = sorted(values)
+            last = len(ordered) - 1
+            return ordered[int(last * 0.005)], ordered[int(last * 0.995)]
+
+        x0, x1 = trimmed([pad.x for pad in pads])
+        y0, y1 = trimmed([pad.y for pad in pads])
+        if x1 - x0 < 1.0 or y1 - y0 < 1.0:
+            return board.board_bbox()
+        return (x0, y0, x1, y1)
+
+    def _start_area_select(self) -> None:
+        if self.board is None:
+            return
+        self._area_rect = None
+        self._area_ready = False
+        self.btn_solve.setEnabled(False)
+        self.status_label.setText("请在布局图上拖拽出矩形选区，松开后点「求解」")
+        self._append_log("进入矩形框选模式：拖拽选择要优化的区域")
+        self.board_view.start_area_select()
+
+    def _on_area_selected(self, rect) -> None:
+        if self.board is None:
+            return
+        # 场景坐标 y 轴是 -mm，这里翻回来
+        x0 = min(rect.left(), rect.right())
+        x1 = max(rect.left(), rect.right())
+        y0 = min(-rect.top(), -rect.bottom())
+        y1 = max(-rect.top(), -rect.bottom())
+        self._area_rect = (x0, y0, x1, y1)
+        self._area_ready = True
+        self.btn_solve.setEnabled(True)
+        self.status_label.setText(
+            f"已选择区域 ({x0:.1f}, {y0:.1f}) ~ ({x1:.1f}, {y1:.1f}) mm，点「求解」开始优化"
+        )
+        self._append_log(
+            f"选区已固定：({x0:.1f}, {y0:.1f}) ~ ({x1:.1f}, {y1:.1f}) mm，等待点「求解」"
+        )
+
+    def _solve_area(self) -> None:
+        rect_mm = getattr(self, "_area_rect", None)
+        if self.board is None or not rect_mm or not getattr(self, "_area_ready", False):
+            self._area_rect = None
+            self._area_ready = False
+            self.btn_solve.setEnabled(False)
+            self.status_label.setText("请先点「求解框」框出区域，再点「求解」")
+            self._append_log("未框选区域：请先点「求解框」，在画布上拖出矩形后再求解")
+            return
+        # 选区只能用一次，避免误点「求解」重复套用旧区域
+        self._area_ready = False
+        self.btn_solve.setEnabled(False)
+        x0, y0, x1, y1 = rect_mm
+        self._append_log(
+            f"开始求解选区 ({x0:.1f}, {y0:.1f}) ~ ({x1:.1f}, {y1:.1f}) mm 的最小移动量…"
+        )
+        board = self.board
+        classifications = dict(self.classifications)
+        rules = self.rules_panel.rules()
+        mounts = list(board.mounts)
+        parts = list(board.floating_parts)
+        session = self.session
+
+        def task(progress, stop):
+            import copy as _copy
+
+            from ..analysis.optimize import optimize_area
+
+            progress("优化", "计算选区内的最小移动量方案…")
+            work_board = _copy.deepcopy(board)
+            plans = optimize_area(
+                work_board, classifications, rules, rect_mm, mounts=mounts, parts=parts
+            )
+            moved = [plan for plan in plans if plan.moved]
+            if not moved:
+                return plans, "", 0
+            progress("备份", "备份工程全部文件…")
+            backup_dir, pcb_files = self._backup_project()
+            progress("移动", f"通过 eda-agent 移动 {len(moved)} 个器件…")
+            moves = [
+                {
+                    "designator": plan.designator,
+                    "x": plan.x1 / 0.0254,
+                    "y": plan.y1 / 0.0254,
+                    "rotation": plan.rot1,
+                }
+                for plan in moved
+            ]
+            session._call("pcb_move_components", {"moves": moves}, timeout=180)
+            return plans, backup_dir, len(moved), pcb_files
+
+        def done(result):
+            plans, backup_dir, count, pcb_files = result
+            self._apply_move_plans(plans, backup_dir, count, pcb_files)
+            self._start_clearance()
+
+        self._run(task, done, "正在优化布局…")
+
+    def _apply_move_plans(
+        self, plans, backup_dir: str, count: int, pcb_files: int = 0
+    ) -> None:
+        board = self.board
+        moved_keys = {(plan.designator, plan.x1, plan.y1) for plan in plans if plan.moved}
+        for plan in plans:
+            if not plan.moved:
+                continue
+            comp = board.components.get(plan.designator)
+            if comp is None:
+                continue
+            dx, dy = plan.x1 - plan.x0, plan.y1 - plan.y0
+            for pad in board.pads_of_component(plan.designator):
+                pad.x += dx
+                pad.y += dy
+            comp.x = plan.x1
+            comp.y = plan.y1
+            comp.rotation = plan.rot1
+
+        self.change_table.setRowCount(len(plans))
+        for row, plan in enumerate(plans):
+            cells = list(plan.rows) + [
+                f"{plan.shift_mm:.2f} mm" if plan.moved else plan.reason
+            ]
+            for column, text in enumerate(cells):
+                self.change_table.setItem(row, column, QTableWidgetItem(text))
+
+        if count:
+            self._append_log(
+                f"已移动 {count} 个器件；PCB 工程备份 {pcb_files} 个文件、"
+                f"源码快照见 {backup_dir}"
+            )
+        else:
+            self._append_log("选区内没有可行解，未移动任何器件")
+        self.status_label.setText(
+            f"优化完成：移动 {count} 个器件"
+            + (f"，PCB 备份 {Path(backup_dir).name}" if backup_dir else "")
+        )
+        self.board_view.set_data(board, self.classifications, self.violations)
+        self.board_view.clear_area()
+        self._area_rect = None
+        self._area_ready = False
+        self.btn_solve.setEnabled(False)
+        self.component_panel.set_components(board)
+
+    # Altium 工程备份：只挑工程/原理图/PCB/库/输出作业这类文件
+    PCB_SUFFIXES = (
+        ".PrjPcb", ".PrjPcbStructure", ".PcbDoc", ".SchDoc", ".PcbLib", ".SchLib",
+        ".IntLib", ".OutJob", ".BomDoc", ".Harness", ".Annotation", ".PcbDwf",
+        ".SchDot", ".PcbDot", ".CmpLib", ".DsnWrk", ".PcbRul", ".RUL",
+    )
+    PCB_SKIP_DIRS = {"__Previews", "History", "Project Outputs for", "Backup"}
+
+    def _backup_project(self) -> tuple[str, int]:
+        """求解前备份：Altium 工程文件 + 本工具源码（不含 json/dev）。
+
+        返回 (备份根目录, PCB 工程文件数量)。
+        """
+        import shutil
+
+        root = _project_root()
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        base = root / "backup" / stamp
+
+        pcb_count = self._copy_altium_project(base / "pcb")
+        self._copy_tool_sources(base / "tool")
+        return str(base), pcb_count
+
+    def _copy_altium_project(self, dest: Path) -> int:
+        """复制当前 PCB 工程的文档（PrjPcb / PcbDoc / SchDoc / 库 …）。"""
+        import shutil
+
+        projects = self._altium_project_roots()
+        count = 0
+        for project_root in projects:
+            base_name = project_root.name or "project"
+            for dirpath, dirnames, filenames in os.walk(project_root):
+                dirnames[:] = [
+                    name for name in dirnames
+                    if name not in self.PCB_SKIP_DIRS
+                ]
+                for name in filenames:
+                    if not name.endswith(self.PCB_SUFFIXES):
+                        continue
+                    src = Path(dirpath) / name
+                    rel = src.relative_to(project_root)
+                    target = dest / base_name / rel
+                    try:
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(src, target)
+                        count += 1
+                    except OSError as exc:
+                        self._append_log(f"PCB 备份跳过 {src.name}：{exc}")
+        return count
+
+    def _altium_project_roots(self) -> list[Path]:
+        """工程文件所在目录 + PcbDoc 所在目录（去重，保留更外层的那一个）。"""
+        candidates: list[Path] = []
+        board = self.board
+        if board is not None and board.source_path:
+            candidates.append(Path(board.source_path).parent)
+        # 当前选中的 .PrjPcb（下拉框里带的是工程路径）
+        try:
+            project_path = str(self._selected_project() or "")
+        except Exception:  # noqa: BLE001 - 下拉框还没建好时忽略
+            project_path = ""
+        if project_path.lower().endswith(".prjpcb"):
+            candidates.append(Path(project_path).parent)
+        roots: list[Path] = []
+        for path in candidates:
+            if not path.is_dir():
+                continue
+            if any(path.is_relative_to(existing) for existing in roots):
+                continue
+            roots = [item for item in roots if not item.is_relative_to(path)]
+            roots.append(path)
+        return roots
+
+    def _copy_tool_sources(self, dest: Path) -> None:
+        """本工具源码快照（跳过 json / dev / 备份自身，体积很小）。"""
+        import shutil
+
+        if getattr(sys, "frozen", False):
+            return  # 打包成 exe 后没有源码可备份
+        root = _project_root()
+        skip = {"dev", "backup", ".venv", "venv", "__pycache__", ".pytest_cache",
+                ".git", "json"}
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [name for name in dirnames if name not in skip]
+            for name in filenames:
+                src = Path(dirpath) / name
+                target = dest / src.relative_to(root)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, target)
+
+
     def _update_severity_filter(self, _checked: bool = False) -> None:
         self.board_view.set_severity_filter(
             self.chk_error.isChecked(), self.chk_warning.isChecked()
@@ -664,7 +1164,7 @@ class MainWindow(QMainWindow):
             answer = QMessageBox.question(
                 self,
                 "尚未连接",
-                "还没有连接 Altium。是否先连接？（也可以点击「示例工程」离线体验）",
+                "还没有连接 Altium。是否先连接？",
                 QMessageBox.Yes | QMessageBox.No,
             )
             if answer == QMessageBox.Yes:
@@ -683,6 +1183,157 @@ class MainWindow(QMainWindow):
             self._on_scanned,
             "正在扫描工程（大板读取器件需要 20~30 秒）…",
         )
+
+    def _pcb_mtime(self) -> float | None:
+        """当前 PCB 文档的修改时间（用来判断是否需要重扫）。"""
+        board = self.board
+        if board is None or not board.source_path:
+            return None
+        try:
+            return Path(board.source_path).stat().st_mtime
+        except OSError:
+            return None
+
+    def _update_pcb_button_state(self) -> None:
+        """「扫描pcb」的启用条件：已连接 + 已扫描过 + 当前空闲。
+
+        Altium 里的改动在保存前不会更新文件 mtime，所以这里**不**拿 mtime
+        当门槛，只把它写进提示，让用户随时可以手动重扫。
+        """
+        if not hasattr(self, "btn_scan_pcb"):
+            return
+        busy = self._worker is not None and self._worker.isRunning()
+        enabled = bool(self.session.connected and self.board is not None and not busy)
+        self.btn_scan_pcb.setEnabled(enabled)
+
+        mtime = self._pcb_mtime()
+        changed = (
+            mtime is not None
+            and self._last_pcb_mtime is not None
+            and abs(mtime - self._last_pcb_mtime) > 1e-6
+        )
+        if not self.session.connected:
+            self.btn_scan_pcb.setToolTip("请先连接 Altium")
+        elif self.board is None:
+            self.btn_scan_pcb.setToolTip("先点「扫描工程」读取一次，之后即可单独重扫 PCB")
+        elif busy:
+            self.btn_scan_pcb.setToolTip("正在扫描，请稍候…")
+        elif changed:
+            self.btn_scan_pcb.setToolTip("检测到 PCB 文件已改动，点击只重读 PCB（跳过原理图网表）")
+        else:
+            self.btn_scan_pcb.setToolTip(
+                "只重读当前 PCB（器件/焊盘/挖空），跳过原理图网表；"
+                "Altium 里未保存的改动同样会被读到"
+            )
+
+    def _scan_pcb(self) -> None:
+        """只重扫 PCB：跳过原理图网表，完成后自动刷新违规与布局视图。"""
+        if not self.session.connected:
+            QMessageBox.information(
+                self, "尚未连接", "请先连接 Altium，再执行「扫描pcb」。"
+            )
+            return
+        project_path = self._selected_project()
+        if not project_path:
+            QMessageBox.information(self, "未选择工程", "请先在下拉框中选择一个工程。")
+            return
+        if self.board is None:
+            QMessageBox.information(self, "尚未扫描", "请先点「扫描工程」读取一次完整数据。")
+            return
+        self.btn_scan_pcb.setEnabled(False)
+        self.demo_mode = False
+        self._run(
+            functools.partial(self._scan_pcb_task, project_path),
+            self._on_pcb_scanned,
+            "正在扫描 PCB（器件 / 焊盘 / 挖空，跳过原理图网表）…",
+        )
+
+    def _scan_pcb_task(self, project_path: str, progress, stop):
+        started = time.time()
+        board, report = self.session.scan(
+            project_path=project_path,
+            progress=progress,
+            should_stop=stop,
+            with_netlist=False,
+            with_sheets=False,
+            with_cutout_outlines=False,
+        )
+        return board, report, time.time() - started
+
+    def _on_pcb_scanned(self, result) -> None:
+        board, report, seconds = result
+        # 挖空端点（铜箔分页，30 秒）不在 PCB 快扫范围内：
+        # 沿用它在上一次完整扫描里读到的顶点，避免每按一次都重读整板。
+        old_points = {
+            (round(cut.x, 2), round(cut.y, 2)): list(cut.points)
+            for cut in (self.board.cutouts if self.board else [])
+            if cut.points
+        }
+        board.cutouts = [
+            BoardCutout(
+                kind=str(item.get("kind") or "circle"),
+                x=float(item.get("x") or 0.0),
+                y=float(item.get("y") or 0.0),
+                width=float(item.get("width") or 0.0),
+                height=float(item.get("height") or 0.0),
+                role=str(item.get("role") or ""),
+                points=[(float(p[0]), float(p[1])) for p in (item.get("points") or [])]
+                or old_points.get((round(float(item.get("x") or 0.0), 2),
+                                   round(float(item.get("y") or 0.0), 2)), []),
+            )
+            for item in (report.cutouts or [])
+        ]
+        board.mounts = self._make_mounts(report.mount_pads)
+        board.floating_parts = self._make_floating_parts(report.floating_parts)
+        if not board.outline:
+            board.outline = list(getattr(self.board, "outline", []) or [])
+        self._apply_baseline_cutout_roles(board)
+
+        # 已有分类沿用；PCB 上新增的网络才做自动判定
+        board_nets = {name for name in board.nets if name}
+        known = set(self.classifications)
+        new_nets = sorted(board_nets - known)
+        seed = {
+            name: copy.deepcopy(item)
+            for name, item in self.classifications.items()
+            if name in board_nets
+        }
+        auto = (
+            classify_board(board, self.pins, only_nets=set(new_nets)) if new_nets else {}
+        )
+        classifications = {**seed, **auto}
+
+        self._apply_scan_result(
+            board,
+            classifications,
+            self.pins,
+            self.sheet_index or SheetNetIndex(),
+            self.sheet_components,
+            self.sheet_paths,
+            self.instance_sheets,
+            self.top_sheet,
+            demo=self.demo_mode,
+            source_note="PCB 增量扫描",
+        )
+        self._append_log(
+            f"仅扫描 PCB 完成：{seconds:.1f}s，器件 {report.component_count} / "
+            f"焊盘 {report.pad_count} / 网络 {report.net_count}，"
+            f"新增网络 {len(new_nets)} 个"
+            + (f"（{'、'.join(new_nets[:6])}…）" if len(new_nets) > 6 else
+               (f"（{'、'.join(new_nets)}）" if new_nets else ""))
+        )
+        for step in report.steps:
+            self._append_log(step)
+        self._auto_save_snapshot()
+        # 只刷新布局视图；违规结果等用户点「重新校验」再算（避免几千行表格卡死）
+        self.violations = []
+        self.aggregated = []
+        self.violation_panel.clear()
+        self.board_view.set_data(board, classifications, [])
+        self.status_label.setText(
+            "PCB 已更新（未重算违规）——点「违规结果」页的「重新校验」查看最新违规"
+        )
+        self._update_pcb_button_state()
 
     def _scan_task(
         self,
@@ -798,6 +1449,15 @@ class MainWindow(QMainWindow):
             )
             for item in (report.cutouts or [])
         ]
+        self._apply_baseline_cutout_roles(board)
+        # 板框来自 HTML 导入，扫描不再从 Altium 读取，这里沿用上一份
+        if not board.outline:
+            board.outline = list(getattr(self.board, "outline", []) or [])
+            if len(board.outline) >= 3:
+                self._append_log(f"板框沿用已导入外形：{len(board.outline)} 点")
+        if not board.outline and getattr(self, "_outline_pending", None):
+            board.outline = list(self._outline_pending)
+            self._outline_pending = None
         self._apply_scan_result(
             board,
             classifications,
@@ -817,7 +1477,10 @@ class MainWindow(QMainWindow):
             self._append_log(step)
         for warning in report.warnings:
             self._append_log("提示：" + warning)
+        self._last_pcb_mtime = self._pcb_mtime()
         self._auto_save_snapshot()
+        self._update_pcb_button_state()
+
 
     def _apply_scan_result(
         self,
@@ -870,6 +1533,11 @@ class MainWindow(QMainWindow):
         self.component_panel.set_components(board)
         self.slot_panel.set_cutouts(board.cutouts)
         self._sheet_dirty = False
+        self._last_pcb_mtime = self._pcb_mtime()
+        if hasattr(self, "btn_solve"):
+            self._area_rect = None
+            self._area_ready = False
+            self.btn_solve.setEnabled(False)
         self.violation_panel.clear()
         self.board_view.set_data(board, classifications, [])
         self._update_overview()
@@ -950,11 +1618,35 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
+        self._import_snapshot_path(path)
+
+    def _import_snapshot_path(self, path: str) -> bool:
+        """按路径导入快照（对话框与命令行共用）。"""
+        _log_import(f"开始导入 {path}")
+        try:
+            return self._import_snapshot_path_inner(path)
+        except Exception:  # noqa: BLE001 - 任何异常都写日志并提示
+            import traceback
+
+            detail = traceback.format_exc()
+            _log_import("失败：" + detail)
+            QMessageBox.warning(self, "导入失败", detail.strip().splitlines()[-1])
+            return False
+
+    def _import_snapshot_path_inner(self, path: str) -> bool:
+        try:
+            head = Path(path).read_bytes()[:48]
+            _log_import(f"文件头: {head!r}")
+        except OSError as exc:
+            _log_import(f"读取文件头失败: {exc}")
         try:
             snapshot = load_snapshot(path)
         except SnapshotError as exc:
             QMessageBox.warning(self, "导入失败", str(exc))
-            return
+            return False
+        except Exception as exc:  # noqa: BLE001 - 其它异常也要能看到
+            QMessageBox.warning(self, "导入失败", f"{type(exc).__name__}: {exc}")
+            return False
         # 导入时先摘掉旧基线，避免本次导入被上一份基线反向覆盖；
         # 导入完成后把这份快照记为新的配置基线，供下次扫描套用。
         self._baseline_snapshot = None
@@ -966,6 +1658,8 @@ class MainWindow(QMainWindow):
             f"已把 {self._baseline_name} 设为配置基线：下次扫描时同名网络沿用其"
             "类别 / 电压 / 参考地，新增网络按自动分类"
         )
+        _log_import(f"导入成功 {path}")
+        return True
 
     def _apply_snapshot(self, snapshot, path: str = "") -> None:
         demo = snapshot.board.source_path.startswith("(内置示例)")
@@ -1026,7 +1720,7 @@ class MainWindow(QMainWindow):
 
     def _reclassify(self) -> None:
         if not self.board:
-            QMessageBox.information(self, "没有数据", "请先扫描一个工程或载入示例工程。")
+            QMessageBox.information(self, "没有数据", "请先扫描一个工程。")
             return
         self.classifications = classify_board(self.board, self.pins)
         fill_missing_classifications(self.classifications, self.sheet_index)
@@ -1050,7 +1744,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def _run_clearance(self) -> None:
         if not self.board:
-            QMessageBox.information(self, "没有数据", "请先扫描一个工程或载入示例工程。")
+            QMessageBox.information(self, "没有数据", "请先扫描一个工程。")
             return
         self._start_clearance()
 

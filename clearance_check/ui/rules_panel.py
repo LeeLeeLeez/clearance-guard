@@ -110,14 +110,19 @@ class RulesPanel(QWidget):
         self.board_edge_gap.setToolTip("器件焊盘（铜箔外沿）到板框外形的最小距离")
         form.addWidget(self.board_edge_gap, 2, 1)
 
-        form.addWidget(QLabel("器件间最小间距（与网络无关）"), 3, 0)
+        form.addWidget(QLabel("器件本体最小间距（3D 本体）"), 3, 0)
+        self.body_gap = _spin(0.3, 0.0, 5.0)
+        self.body_gap.setToolTip("按机械层 / 3D 外形投影计算，干涉或过近都会报错")
+        form.addWidget(self.body_gap, 3, 1)
+
+        form.addWidget(QLabel("器件间最小间距（与网络无关）"), 4, 0)
         self.component_gap = _spin(0.3, 0.0, 5.0)
-        form.addWidget(self.component_gap, 3, 1)
+        form.addWidget(self.component_gap, 4, 1)
 
         self.step_enabled = QCheckBox("按电压差增加间距")
-        form.addWidget(self.step_enabled, 4, 0, 1, 2)
+        form.addWidget(self.step_enabled, 5, 0, 1, 2)
 
-        form.addWidget(QLabel("每"), 5, 0)
+        form.addWidget(QLabel("每"), 6, 0)
         step_row = QHBoxLayout()
         self.step_v = QDoubleSpinBox()
         self.step_v.setRange(1, 5000)
@@ -132,7 +137,7 @@ class RulesPanel(QWidget):
         step_row.addWidget(self.step_v)
         step_row.addWidget(self.step_mm)
         step_row.addStretch(1)
-        form.addLayout(step_row, 5, 1)
+        form.addLayout(step_row, 6, 1)
 
         self.cross_class_only = QCheckBox("只检查不同电压类别之间（忽略同类网络）")
         self.check_same_component = QCheckBox("检查同一器件内部焊盘（保留隔离器件内部爬电）")
@@ -145,7 +150,7 @@ class RulesPanel(QWidget):
                 self.check_same_component,
                 self.include_tracks,
             ),
-            start=6,
+            start=7,
         ):
             form.addWidget(box, index, 0, 1, 2)
         form.setColumnStretch(1, 1)
@@ -193,6 +198,7 @@ class RulesPanel(QWidget):
             self.isolation,
             self.isolation_clearance,
             self.board_edge_gap,
+            self.body_gap,
             self.component_gap,
             self.step_v,
             self.step_mm,
@@ -212,6 +218,7 @@ class RulesPanel(QWidget):
         self.isolation.setValue(rules.isolation_gap_mm)
         self.isolation_clearance.setValue(rules.isolation_clearance_mm)
         self.board_edge_gap.setValue(rules.board_edge_gap_mm)
+        self.body_gap.setValue(rules.body_gap_mm)
         self.component_gap.setValue(rules.component_gap_mm)
         self.component_gap_enabled.setChecked(rules.component_gap_enabled)
         self.step_enabled.setChecked(rules.voltage_step_enabled)
@@ -232,6 +239,7 @@ class RulesPanel(QWidget):
             isolation_gap_mm=round(self.isolation.value(), 3),
             isolation_clearance_mm=round(self.isolation_clearance.value(), 3),
             board_edge_gap_mm=round(self.board_edge_gap.value(), 3),
+            body_gap_mm=round(self.body_gap.value(), 3),
             component_gap_mm=round(self.component_gap.value(), 3),
             component_gap_enabled=self.component_gap_enabled.isChecked(),
             voltage_step_enabled=self.step_enabled.isChecked(),

@@ -13,10 +13,13 @@ from PySide6.QtWidgets import (
 
 from ..geometry import pad_polygon
 from ..model import Board, NetClassification, Violation
-from .theme import BORDER, WARN, class_color, CLASS_COLORS, DANGER, MUTED
+from .theme import ACCENT, BORDER, WARN, class_color, CLASS_COLORS, DANGER, MUTED
 
 
 class BoardView(QGraphicsView):
+
+    areaSelected = Signal(object)   # QRectF（场景坐标，mm）
+    selectModeChanged = Signal(bool)
     """可缩放/平移的板视图。"""
 
     violationPicked = Signal(int)
@@ -34,6 +37,9 @@ class BoardView(QGraphicsView):
 
         self._board: Board | None = None
         self._show_error = True
+        self._selecting = False
+        self._sel_start = None
+        self._sel_item = None
         self._show_warning = True
         self._classifications: dict[str, NetClassification] = {}
         self._violations: list[Violation] = []
@@ -58,6 +64,47 @@ class BoardView(QGraphicsView):
         self._selected = -1
         self._rebuild()
 
+    # ---- 矩形框选 -------------------------------------------------
+    def start_area_select(self) -> None:
+        """进入矩形框选模式（拖拽出矩形，松开后保留框线并发出 areaSelected）。"""
+        self.clear_area()
+        self._selecting = True
+        self.setDragMode(QGraphicsView.NoDrag)
+        self.viewport().setCursor(Qt.CrossCursor)
+        self.selectModeChanged.emit(True)
+
+    def clear_area(self) -> None:
+        """移除画布上的选区框。"""
+        self._selecting = False
+        self._sel_start = None
+        if self._sel_item is not None:
+            try:
+                self._scene.removeItem(self._sel_item)
+            except RuntimeError:
+                pass  # 图元已随 scene.clear() 销毁
+            self._sel_item = None
+        self.setDragMode(QGraphicsView.ScrollHandDrag)
+        self.viewport().unsetCursor()
+        self.selectModeChanged.emit(False)
+
+    def _finish_area(self, rect) -> None:
+        """把这次拖拽的结果留在画布上，并通知外部。"""
+        self._selecting = False
+        self._sel_start = None
+        if self._sel_item is not None:
+            try:
+                self._scene.removeItem(self._sel_item)
+            except RuntimeError:
+                pass
+            self._sel_item = None
+        pen = QPen(QColor(ACCENT), 0.35, Qt.DashLine)
+        self._sel_item = self._scene.addRect(rect, pen, QBrush(QColor(59, 130, 246, 36)))
+        self.setDragMode(QGraphicsView.ScrollHandDrag)
+        self.viewport().unsetCursor()
+        self.selectModeChanged.emit(False)
+        if rect.width() > 0.5 and rect.height() > 0.5:
+            self.areaSelected.emit(rect)
+
     def set_severity_filter(self, show_error: bool, show_warning: bool) -> None:
         """独立控制 ERROR / WARNING 违规标记的显示。"""
         self._show_error = bool(show_error)
@@ -78,6 +125,10 @@ class BoardView(QGraphicsView):
         self._scene.clear()
         self._markers.clear()
         self._labels.clear()
+        # scene.clear() 会销毁选区图元，这里同步丢掉引用，
+        # 否则下次 clear_area() 会操作已删除的 C++ 对象而抛异常。
+        self._sel_item = None
+        self._sel_start = None
         board = self._board
         if board is None:
             return
@@ -115,7 +166,12 @@ class BoardView(QGraphicsView):
             "frame": "#334155",
             "": "#475569",
         }
+        has_outline = len(getattr(board, "outline", []) or []) >= 3
         for cutout in getattr(board, "cutouts", []) or []:
+            # 板框类挖空就是板子外形本身：已有 board.outline 时不再重复画，
+            # 否则旧轮廓会和新导入的板框叠在一起，看起来像“没变化”。
+            if has_outline and getattr(cutout, "role", "") == "frame":
+                continue
             color = QColor(cutout_colors.get(getattr(cutout, "role", ""), "#475569"))
             if getattr(cutout, "is_circle", False):
                 self._scene.addEllipse(
@@ -284,6 +340,15 @@ class BoardView(QGraphicsView):
         event.accept()
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
+        if self._selecting and event.button() == Qt.LeftButton:
+            self._sel_start = self.mapToScene(event.position().toPoint())
+            pen = QPen(QColor(ACCENT), 0.3, Qt.DashLine)
+            self._sel_item = self._scene.addRect(
+                QRectF(self._sel_start, self._sel_start),
+                pen,
+                QBrush(QColor(59, 130, 246, 40)),
+            )
+            return
         if event.button() == Qt.LeftButton:
             scene_pos = self.mapToScene(event.position().toPoint())
             nearest = None
@@ -297,6 +362,20 @@ class BoardView(QGraphicsView):
                 event.accept()
                 return
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._selecting and self._sel_start is not None and self._sel_item is not None:
+            current = self.mapToScene(event.position().toPoint())
+            self._sel_item.setRect(QRectF(self._sel_start, current).normalized())
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if self._selecting and self._sel_start is not None:
+            current = self.mapToScene(event.position().toPoint())
+            self._finish_area(QRectF(self._sel_start, current).normalized())
+            return
+        super().mouseReleaseEvent(event)
 
     def select_violation(self, index: int) -> None:
         self._selected = index

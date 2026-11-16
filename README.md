@@ -1,3 +1,131 @@
+## 界面：oink-ui Web 版（2026-11 起）
+
+界面已从 PySide6 重写为 **React 18 + Vite + TypeScript + oink-ui** 的本地 Web 应用；
+**判定逻辑一行没改** —— `clearance_check/analysis`、`eda`、`snapshot` 原样复用。
+
+```
+app.py                    旧版 PySide6 界面（保留，双击 run-tk.cmd）
+server.py                 新版入口：本地 HTTP 服务（API + 前端托管，默认 127.0.0.1:8770）
+api/                      服务层：状态 / 编排 / 序列化（不碰算法）
+  store.py                路径、全局状态、JSON 序列化、规则合并
+  scan_service.py         连接、工程列表、扫描（后台线程 + 进度）、快照、示例
+  edit_service.py         分类表 / 安装焊盘 / 无网络器件 / 挖空 / 间距规则
+  result_service.py       避距校验、违规结果、CSV、布局求解与移动、板框 HTML
+web/                      前端（React + oink-ui）
+  src/pages/ScanPage      工程与扫描（扫描日志 / 器件列表 / 网络电压分类 / 安装焊盘 / 无网络器件）
+  src/pages/RulesPage     间距规则（3×3 矩阵 + 隔离带 + 电压差增量 + 开关）
+  src/pages/ViolationPage 违规结果（器件级/焊盘级、类型/规则/隔离带筛选、搜索、CSV、定位）
+  src/pages/LayoutPage    布局视图（Canvas：板框/焊盘着色/违规圈 + ERROR/WARNING 筛选/缩放平移/选区求解）
+  src/pages/SlotPage      爬电隔离槽（归属、轮廓坐标）
+  web/dist/               构建产物（npm run build 生成）
+```
+
+### 开始菜单 / 桌面快捷方式
+
+双击 **`创建快捷方式.cmd`**，会在**开始菜单**和**桌面**各放一个 `Clearance Guard.lnk`：
+
+| 属性 | 值 |
+|---|---|
+| 目标 | `run.cmd` |
+| 起始位置 | 项目根 |
+| 图标 | `assets\app_icon.ico` |
+| 窗口样式 | 最小化（减少 cmd 一闪） |
+
+点快捷方式时 `run.cmd` 会：
+
+1. **探测 8770 端口**（用 Python socket，0.2 秒、不弹窗）——服务已在跑就直接复用，不会起第二个实例；
+2. 没跑就用 `pythonw server.py --no-browser` 后台拉起，轮询端口就绪（最多 30 秒）；
+3. 用 **Edge 的 `--app=` 应用模式**打开：**无地址栏、无标签页、独立任务栏图标**（图标取自页面 `favicon.ico`）——
+   看起来就是个普通软件窗口；没有 Edge 时退回默认浏览器。
+
+想固定到任务栏：开始菜单里右键该快捷方式 →「固定到任务栏」。
+卸载：直接删快捷方式，程序本体不受影响。
+
+> 为什么不用 `msedge.exe <url>` 直接开：那样是普通浏览器标签页，关掉时可能连带关掉整个浏览器；
+> `--app` 模式是独立进程窗口，关它不影响你其它浏览页。
+> 想要「真·原生」（无 Browser 进程、可内嵌自绘菜单），那得上 Tauri / pywebview 壳，属于另一个改造量级。
+
+### 文件选择走 Windows 原生对话框
+
+浏览器沙箱拿不到真实文件路径，但本工具的后端就跑在本机，所以「另存为 / 打开」交给
+**服务端**弹系统对话框（资源管理器风格），前端只拿返回的绝对路径：
+
+| 操作 | 行为 |
+|---|---|
+| 导出快照… | 弹「另存为」→ 默认文件名 `<板名>_<时间戳>.json`，默认目录 `json/` |
+| 导入快照… | 弹「打开」→ 过滤 `*.json` |
+| 最近快照 | 不弹窗，列出 `json/` 与上次自动保存的快照（快选） |
+| 打开工程… | 弹「打开」→ 过滤 `*.PrjPcb` |
+| 导入板框HTML… | 弹「打开」→ 过滤 `*.html;*.htm` |
+| 导出 CSV | 弹「另存为」→ 默认 `clearance_<时间戳>.csv` |
+| 打开文件夹 | 导出成功后出现，用 `explorer /select,` 在资源管理器里定位该文件 |
+
+实现见 `api/dialog_service.py`：
+
+* tkinter 要求**所有调用在同一线程**，HTTP 请求却是各自线程 —— 所以起一条**专用 Tk 线程**，
+  请求把「要弹什么」投进队列，Tk 线程弹窗、回传结果；
+* 服务启动时调 `dialog_service.start()` 拉起该线程（失败只在日志里提示，不影响其它功能）；
+* `server.py` 顶部给 `sys.stdout/stderr` 补了 None 兜底（`pythonw` 启动时它们是 None，
+  直接 `print` 会崩）。
+
+> 没有 tkinter 的 Python 用不了这套（点按钮会提示「服务端文件对话框不可用」），
+> 但扫描、校验等其它功能不受影响 —— 快照路径也可以走「最近快照」或手改后端返回的路径。
+
+**顶栏页签顺序（与 PySide6 版一致）**：
+工程与扫描 → 爬电隔离槽 → 间距规则 → 违规结果 → 布局视图。
+「工程与扫描」内 5 个子页：扫描日志 / 器件列表 / 网络电压分类 / 安装焊盘 / 无网络器件。
+顶栏工具条：连接 Altium、刷新列表、打开工程…、扫描工程、**扫描pcb**、导出/导入快照、退出服务。
+
+> 违规清单的筛选与原版 `violation_panel` 对齐：**器件级/焊盘级**、**类型**（全部 / ERROR / WARNING）、
+> **规则类别**（规则名去掉数值归一化后再分组，如「器件间最小间距」「类别矩阵：副边 / 副边」）、
+> **只看隔离带**（原边 ↔ 副边的组合）、**位号/网络搜索**；右上角显示「筛选后 N / 共 M 条」。
+> 规则清单随结果一起下发（`rules: [{key,label,count}]`），切换筛选只发一次本地请求。
+
+> 布局视图的 **ERROR / WARNING** 两个开关对应原版 `board_view.set_severity_filter` +
+> `chk_error` / `chk_warning`：关掉哪一类就不画哪一类圈（ERROR 红、WARNING 黄），
+> 图例带实时计数；圈的半径按缺口放大（0.2 mm 缺口也有 9px 下限，否则整板缩放下看不见）。
+
+> 「间距规则」页的「保存并重新校验」会先落盘当前规则、再重算避距（735 器件实测 9~18 秒），
+> 期间按钮显示 loading、状态栏显示进度，完成后卡片里直接给出器件级条数 / ERROR / 最差缺口。
+
+> 最新版**没有「示例工程」按钮**（示例改用 `python app.py --demo`）；Web 版同样不显示该按钮，
+> 后端 `POST /api/demo` 仍保留供调试。
+
+**启动**：双击 `run.cmd`（起服务并自动开浏览器）；旧界面双击 `run-tk.cmd`。
+停服务：界面右上「退出服务」，或结束 `pythonw.exe`。
+
+**前端开发**：
+
+```bat
+cd web
+npm install
+npm run dev        :: 5178，/api 代理到 8770
+```
+
+**HTTP API**（38 个端点，全部 JSON）：
+
+| 分组 | 端点 |
+|---|---|
+| 连接 | `GET /api/status`、`POST /api/connect`、`POST /api/disconnect`、`GET /api/projects`、`POST /api/open-project` |
+| 扫描 | `POST /api/scan`、`POST /api/scan-cancel`、`GET /api/task`、`POST /api/demo` |
+| 扫描pcb | `POST /api/scan-pcb`（只重读 PCB，沿用上次分类，不重算违规） |
+| 器件 | `GET /api/components?q=`、`POST /api/component`（改类别，如烧录端子） |
+| 快照 | `GET /api/snapshots`、`POST /api/snapshot/export`、`POST /api/snapshot/import` |
+| 分类 | `GET /api/nets`、`POST /api/net`、`POST /api/nets/bulk`、`POST /api/reclassify`、`GET /api/sheets`、`POST /api/sheet/secondary`、`POST /api/common/route` |
+| 对象 | `GET /api/objects`、`POST /api/mount`、`POST /api/floating`、`POST /api/cutout`、`POST /api/cutout/outlines` |
+| 规则 | `GET /api/rules`、`POST /api/rules` |
+| 结果 | `POST /api/clearance`、`GET /api/violations?kind=&severity=&rule=&isolation=&search=`、`POST /api/export-csv`、`GET /api/near-miss`、`POST /api/locate` |
+| 布局 | `GET /api/layout`、`POST /api/outline-html`、`POST /api/solve`、`POST /api/apply-moves` |
+
+**实测（VPDB_A4 快照，735 器件 / 2261 焊盘 / 256 网络）**：
+状态与统计、分类表（267 网络）、安装焊盘 8 / 无网络器件 1 / 挖空 17 全部正常；
+避距校验 237 条器件级（134 ERROR，最差缺口 0.98 mm，9.2 s）；
+布局视图 395 点板框 + 2261 焊盘按类别着色正常渲染。
+
+> 契约坑：`NetClassification.range_text`、`Violation.deficit_mm`、`BoardCutout.diameter` 等
+> 都是 **`@property`**，序列化时不能再加 `()`。
+
+
 # Clearance Guard
 
 基于 **Altium EDA Agent（eda-agent 0.8.1）** 的实时避距（clearance / creepage）审核工具。
@@ -6,7 +134,10 @@
 器件、焊盘、网络、原理图编译网表。随后自动判定每个网络属于原边（恒定 / 跳变）还是副边，
 按自定义间距规则找出存在避距违规的器件，并给出**实测距离、要求距离与还差多少毫米**。
 
-![界面概览](dev/shot_overview.png)
+> **界面截图在本地 `dev/` 目录**（`shot_web_scan.png` / `shot_web_result.png` /
+> `shot_web_layout.png` 是新版，`shot_overview.png` 等是旧版 PySide6）。
+> 不随仓库分发的原因：本机 DLP 透明加密会把新生成的 PNG 变成密文（文件头 `%TSD`），
+> 传到 GitHub 上也是乱码 —— 与 `assets/` 里的 `.ico`（明文，正常上传）不同。
 
 ## 功能
 
@@ -473,4 +604,99 @@ python scripts/screenshot.py      # 渲染界面截图到 dev/
 
 ## 许可
 
-本工具仅通过 Altium 官方脚本接口读取设计数据，不修改原理图与 PCB。使用前请自行备份工程。
+本工具默认只通过 Altium 官方脚本接口**读取**设计数据；只有在你主动点「布局视图 → 求解框 → 求解」
+并确认方案时，才会调用 `pcb_move_components` 移动器件，且移动前会自动备份工程（见下节）。
+
+## 板框外形（HTML 导入）
+
+板框不再由 eda-agent 读取：在「布局视图」点 **导入板框HTML…**，选一份记录 SVG 外形的
+HTML（例如 `VPDB_A4_板框外形记录.html`），程序会：
+
+- 从 `<path d="…">` 里解析 `M/L/H/V/A/Z`（圆弧按 6° 离散），取包围盒最大的那条路径当板框；
+- 自动按焊盘范围判断 SVG 的 y 轴朝向（HTML 里 y 朝下、Altium 朝上），必要时上下翻转；
+- 结果存进快照，后续「扫描工程」「扫描pcb」都沿用，不再访问 Altium 的板框接口。
+
+## 器件本体间距
+
+规则页新增 **器件本体最小间距（3D 本体）0.30 mm**：
+
+- 扫描时记录每个器件的本体外形（桥接 `pcb_get_components` 的 `bbox_no_name_comment`，
+  含机械层 / 3D 外形投影）；
+- 判定时先用本体框粗筛，再对同面（TOP/BOTTOM）器件的焊盘外框逐对求最小间距，
+  避免“两个焊盘中间的空白”被误当成重叠；
+- 例如 `U9 ↔ C106` 本体只差 0.14 mm 时会报 `器件本体最小间距 0.3 mm`（ERROR）；
+- 正反面的器件在 XY 上重叠不判干涉；规则可关闭（设 0）。
+
+## 扫描工程 / 扫描pcb
+
+顶栏右侧现在是两个扫描入口（「示例工程」按钮已移除，示例改用 `python app.py --demo`）：
+
+```
+刷新列表  打开工程…  扫描工程
+                     扫描pcb
+```
+
+| 按钮 | 行为 | 耗时 |
+|---|---|---|
+| **扫描工程** | 完整扫描：PCB + 原理图网表 + 图纸归属 | 大板 1~2 分钟 |
+| **扫描pcb** | 只重读 PCB：器件 / 焊盘 / 安装孔 / 板框 / 挖空（挖空端点沿用上次结果） | 明显更快 |
+
+「扫描pcb」的启用条件：已连接 Altium、已扫描过一次、当前没有任务在跑。
+
+**完成后只刷新布局视图，不重算违规**——几千行违规表会把界面拖到像卡死。
+需要最新违规时，去「违规结果」页点 **「重新校验」** 手动触发。
+
+> 违规表最多铺 800 行（真实条数仍显示在上方统计卡片），避免大板卡顿。
+
+## 打包成 exe
+
+双击根目录 **`打包exe.cmd`**，或：
+
+```bash
+python scripts/build_exe.py --clean     # 产物 dist/ClearanceGuard.exe（约 43 MB）
+```
+
+- 单文件、无控制台窗口；`assets/` 已打进 exe，运行时从 `_MEIPASS` 取；
+- **图标统一**：exe 资源文件、标题栏、任务栏、开始菜单/固定到任务栏都用同一份 `assets/app_icon.ico`
+  （`app.py` 里 `setWindowIcon` + `SetCurrentProcessExplicitAppUserModelID`，
+  否则 Windows 会把任务栏图标显示成 python 的）；
+- 打包后 `backup/` 与 `last_scan.json` 落在 **exe 所在目录 / `%APPDATA%\ClearanceGuard`**，
+  不再写工程源码目录；
+- 改了图标后重跑一次 `python scripts/make_icon.py`，再重新打包即可。
+
+### 打包后读文件被 DLP 加密怎么办
+
+本机 DLP 只对白名单进程（`python.exe` 等）透明解密；新打包的 `ClearanceGuard.exe`
+不在白名单里，读 `json/*.json`、`last_scan.json`、`clearance_rules.json` 拿到的是密文
+（文件头 `%TSD-Header-###%`），表现为「导入快照失败：UnicodeDecodeError」。
+
+程序里已内置兼容层 `clearance_check/plainfile.py`：
+
+1. 先正常读文件，发现 `%TSD` 头就换策略；
+2. 启动一个**白名单解释器**（`python.exe` / `py -3`）用
+   `python -c "sys.stdout.buffer.write(open(path,'rb').read())"` 通过 **stdout 管道**
+   把明文送回（管道不受加密影响，全程不落盘）；
+3. 找不到可用解释器时给出明确提示：把 `ClearanceGuard.exe` 加入 DLP 白名单，或改用
+   `python app.py` 运行。
+
+因此建议二选一：**给 exe 加白名单**（最省事），或**保留一份 python 环境**供解密兜底。
+
+## 布局优化与工程备份
+
+求解流程：`求解框`（拖矩形选区）→ `求解`（计算最小移动量）→ 若有可行解则
+
+约束：**单个器件位移上限 1 mm**（步长 0.1 mm、8 个方向由小到大试），且候选位置必须
+①焊盘与器件本体都在板框内、②不与任何对象违规；1 mm 内找不到这样的位置就保持不动。
+所以「变更详情」里出现「1 mm 内无可行解，保持不动」是正常的——那种违规需要更大位移。
+
+备份与移动：
+
+1. **备份 Altium 工程**到 `backup/<时间戳>/pcb/`，按原目录结构保存
+   （`.PrjPcb / .PrjPcbStructure / .PcbDoc / .SchDoc / .PcbLib / .SchLib / .OutJob` 等，
+   跳过 `__Previews / History / Project Outputs`）；
+2. 同时把**本工具源码**快照到 `backup/<时间戳>/tool/`（不含 `json/`、`dev/`，体积很小）；
+3. 再调用 `pcb_move_components` 一次性移动器件；
+4. 「变更详情」页列出每个器件的移动前/后坐标与旋转。
+
+回滚：把 `backup/<时间戳>/pcb/` 下的文件按原结构拷回工程目录即可。
+备份目录不参与上传（`gh_upload.py` 排除 `backup/*`，`.gitignore` 同样忽略）。

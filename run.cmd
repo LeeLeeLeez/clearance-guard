@@ -1,16 +1,44 @@
 @echo off
-chcp 936 >nul
+chcp 65001 >nul
 setlocal
 title Clearance Guard
 cd /d "%~dp0"
 
-set "APP=%~dp0app.py"
-if not exist "%APP%" (
-    echo [´íÎó] Î´ÕÒµ½ app.py£¬Çë°Ñ run.cmd ·ÅÔÚÏîÄ¿¸ùÄ¿Â¼¡£
+rem ================================================================
+rem  Clearance Guard å¯åŠ¨å™¨ï¼ˆoink-ui / Web ç‰ˆï¼‰
+rem
+rem  è¡Œä¸ºï¼š
+rem    1) æœ¬åœ°æœåŠ¡ï¼ˆ127.0.0.1:8770ï¼‰æ²¡åœ¨è·‘ â†’ ç”¨ pythonw åå°æ‹‰èµ·ï¼ˆæ— é»‘çª—ï¼‰
+rem    2) ç”¨ Edge çš„ã€Œåº”ç”¨æ¨¡å¼ã€æ‰“å¼€ â€”â€” æ— åœ°å€æ ã€æ— æ ‡ç­¾é¡µï¼Œä»»åŠ¡æ ç‹¬ç«‹å›¾æ ‡
+rem    3) æ²¡æœ‰ Edge å°±é€€å›é»˜è®¤æµè§ˆå™¨
+rem
+rem  æƒ³åŠ å¼€å§‹èœå•/æ¡Œé¢å¿«æ·æ–¹å¼ï¼šåŒå‡»ã€Œåˆ›å»ºå¿«æ·æ–¹å¼.cmdã€
+rem  æ—§ç‰ˆ PySide6 ç•Œé¢ï¼šåŒå‡» run-tk.cmd
+rem ================================================================
+
+set "PORT=8770"
+set "APPURL=http://127.0.0.1:%PORT%/"
+set "EDGE=C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+if not exist "%EDGE%" set "EDGE=C:\Program Files\Microsoft\Edge\Application\msedge.exe"
+
+if not exist "%~dp0server.py" (
+    echo [é”™è¯¯] æœªæ‰¾åˆ° server.pyï¼Œè¯·æŠŠ run.cmd æ”¾åœ¨é¡¹ç›®æ ¹ç›®å½•ã€‚
+    pause
+    exit /b 1
+)
+if not exist "%~dp0web\dist\index.html" (
+    echo.
+    echo [é”™è¯¯] å‰ç«¯è¿˜æ²¡æ„å»ºã€‚
+    echo        è¯·åœ¨é¡¹ç›®æ ¹æ‰§è¡Œï¼š
+    echo            cd web
+    echo            npm install
+    echo            npm run build
+    echo.
     pause
     exit /b 1
 )
 
+rem ---------------------------------------------------------------- æ‰¾ Python
 set "PYEXE="
 if exist "%~dp0.venv\Scripts\python.exe" set "PYEXE=%~dp0.venv\Scripts\python.exe"
 if not defined PYEXE if exist "%~dp0venv\Scripts\python.exe" set "PYEXE=%~dp0venv\Scripts\python.exe"
@@ -19,32 +47,8 @@ if not defined PYEXE for /f "delims=" %%P in ('py -3 -c "import sys;print(sys.ex
 
 if not defined PYEXE (
     echo.
-    echo [´íÎó] Ã»ÓĞÕÒµ½ Python 3.10+¡£
-    echo        Çë°²×° Python£¬²¢ÔÚ°²×°Ê±¹´Ñ¡ "Add python.exe to PATH"£¬È»ºóÖØĞÂË«»÷±¾ÎÄ¼ş¡£
-    echo.
-    pause
-    exit /b 1
-)
-
-"%PYEXE%" -c "import PySide6" >nul 2>nul
-if errorlevel 1 (
-    echo [ÌáÊ¾] µ±Ç° Python È±ÉÙ PySide6£¬ÕıÔÚ°²×°ÒÀÀµ...
-    "%PYEXE%" -m pip install -r "%~dp0requirements.txt"
-    if errorlevel 1 (
-        echo.
-        echo [´íÎó] ÒÀÀµ°²×°Ê§°Ü£¬ÇëÊÖ¶¯Ö´ĞĞ£º
-        echo        "%PYEXE%" -m pip install PySide6
-        echo.
-        pause
-        exit /b 1
-    )
-)
-
-"%PYEXE%" -c "import clearance_check.ui.main_window" >nul 2>nul
-if errorlevel 1 (
-    echo [´íÎó] ³ÌĞòµ¼ÈëÊ§°Ü£¬ÍêÕû´íÎóÈçÏÂ£º
-    echo.
-    "%PYEXE%" -c "import clearance_check.ui.main_window"
+    echo [é”™è¯¯] æ²¡æœ‰æ‰¾åˆ° Python 3.10+ã€‚
+    echo        è¯·å®‰è£… Pythonï¼Œå¹¶åœ¨å®‰è£…æ—¶å‹¾é€‰ "Add python.exe to PATH"ã€‚
     echo.
     pause
     exit /b 1
@@ -53,18 +57,36 @@ if errorlevel 1 (
 set "PYW=%PYEXE:python.exe=pythonw.exe%"
 if not exist "%PYW%" set "PYW=%PYEXE%"
 
-echo ÕıÔÚÆô¶¯ Clearance Guard ...
-if /i "%PYW%"=="%PYEXE%" (
-    "%PYEXE%" "%APP%" %*
-    set "CODE=%ERRORLEVEL%"
-) else (
-    start "" "%PYW%" "%APP%" %*
-    set "CODE=0"
+rem ------------------------------------------------- æœåŠ¡æ˜¯å¦å·²åœ¨è·‘ï¼Ÿï¼ˆsocket æ¢æµ‹ï¼Œæ— çª—å£ï¼‰
+"%PYEXE%" -c "import socket,sys;s=socket.socket();s.settimeout(0.5);sys.exit(0 if s.connect_ex(('127.0.0.1',%PORT%))==0 else 1)" >nul 2>&1
+if not errorlevel 1 goto open
+
+rem ------------------------------------------------- èµ·æœåŠ¡ï¼ˆåå°ï¼Œä¸å¼¹çª—ï¼‰
+"%PYEXE%" -c "import server" >nul 2>&1
+if errorlevel 1 (
+    echo [é”™è¯¯] åç«¯å¯¼å…¥å¤±è´¥ï¼Œå®Œæ•´é”™è¯¯å¦‚ä¸‹ï¼š
+    echo.
+    "%PYEXE%" -c "import server"
+    echo.
+    pause
+    exit /b 1
 )
 
-if not "%CODE%"=="0" (
-    echo.
-    echo ³ÌĞòÒì³£ÍË³ö£¬´íÎóÂë %CODE%¡£
-    pause
+start "" "%PYW%" "%~dp0server.py" --no-browser --port %PORT%
+
+rem ç­‰ç«¯å£å°±ç»ªï¼Œæœ€å¤š 30 ç§’
+for /l %%i in (1,1,30) do (
+    "%PYEXE%" -c "import socket,sys;s=socket.socket();s.settimeout(0.4);sys.exit(0 if s.connect_ex(('127.0.0.1',%PORT%))==0 else 1)" >nul 2>&1
+    if not errorlevel 1 goto open
+    ping -n 2 127.0.0.1 >nul
 )
-endlocal
+
+echo [æç¤º] æœåŠ¡å¯åŠ¨è¾ƒæ…¢ï¼Œå·²è·³è¿‡ç­‰å¾…ï¼Œç›´æ¥æ‰“å¼€é¡µé¢ã€‚
+
+:open
+if exist "%EDGE%" (
+    start "" "%EDGE%" --app=%APPURL%
+) else (
+    start "" %APPURL%
+)
+exit /b 0
