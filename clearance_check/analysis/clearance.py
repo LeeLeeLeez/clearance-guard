@@ -390,7 +390,8 @@ def find_violations(
             component = board.components.get(item.component)
             if component is not None and getattr(component, "is_burn_terminal", False):
                 continue
-            distance = boundary_distance(item.polygon, outline)
+            # 只要确认不小于 limit 就够了，用不上精确值（大板能省下大量边遍历）
+            distance = boundary_distance(item.polygon, outline, limit=limit)
             if limit - distance < MIN_DEFICIT_MM:
                 continue
             point_pad, point_edge = nearest_points(item.polygon, outline)

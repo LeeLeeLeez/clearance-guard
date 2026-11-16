@@ -143,24 +143,123 @@ def _point_seg_distance(p: Point, a: Point, b: Point) -> float:
     return math.hypot(apx - t * abx, apy - t * aby)
 
 
-def boundary_distance(poly: list[Point], outline: list[Point]) -> float:
+def _bbox_of(poly: Polygon) -> tuple[float, float, float, float]:
+    """多边形的包围盒（比 polygon_bbox 少两次列表分配）。"""
+    xs = [point[0] for point in poly]
+    ys = [point[1] for point in poly]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _outline_segments(outline: list[Point]):
+    """把闭合轮廓拆成边，附带每条边的包围盒（供剪枝用）。"""
+    count = len(outline)
+    for index in range(count):
+        ax, ay = outline[index]
+        bx, by = outline[(index + 1) % count]
+        min_x, max_x = (ax, bx) if ax <= bx else (bx, ax)
+        min_y, max_y = (ay, by) if ay <= by else (by, ay)
+        yield (ax, ay, bx, by, min_x, min_y, max_x, max_y)
+
+
+class _OutlineGrid:
+    """板框边的均匀网格索引。
+
+    板框常有数百段，而绝大多数焊盘离板边很远；把边按包围盒挂到格子上之后，
+    只需检查焊盘附近那几格，就能判定"距离一定不小于阈值"。
+    """
+
+    __slots__ = ("outline", "cell", "segments", "buckets")
+
+    def __init__(self, outline: list[Point], cell: float):
+        self.outline = outline
+        self.cell = cell
+        self.segments: list[tuple[float, float, float, float, float, float, float, float]] = []
+        self.buckets: dict[tuple[int, int], list[int]] = {}
+        for ax, ay, bx, by, min_x, min_y, max_x, max_y in _outline_segments(outline):
+            slot = len(self.segments)
+            self.segments.append((ax, ay, bx, by, min_x, min_y, max_x, max_y))
+            gx0, gx1 = math.floor(min_x / cell), math.floor(max_x / cell)
+            gy0, gy1 = math.floor(min_y / cell), math.floor(max_y / cell)
+            for gx in range(gx0, gx1 + 1):
+                for gy in range(gy0, gy1 + 1):
+                    self.buckets.setdefault((gx, gy), []).append(slot)
+
+    def near(
+        self, box: tuple[float, float, float, float], radius: float
+    ) -> list[int]:
+        """返回包围盒向外扩 radius 后覆盖到的所有边索引。"""
+        cell = self.cell
+        x0, y0, x1, y1 = box
+        found: set[int] = set()
+        for gx in range(math.floor((x0 - radius) / cell), math.floor((x1 + radius) / cell) + 1):
+            for gy in range(math.floor((y0 - radius) / cell), math.floor((y1 + radius) / cell) + 1):
+                bucket = self.buckets.get((gx, gy))
+                if bucket:
+                    found.update(bucket)
+        return list(found)
+
+
+_GRID_CACHE: dict[int, _OutlineGrid] = {}
+
+
+def _outline_grid(outline: list[Point]) -> _OutlineGrid:
+    """按对象身份缓存最近一块板的索引（板框在计算期间不会变）。"""
+    key = id(outline)
+    cached = _GRID_CACHE.get(key)
+    if cached is not None and cached.outline is outline:
+        return cached
+    xs = [point[0] for point in outline]
+    ys = [point[1] for point in outline]
+    span = max(max(xs) - min(xs), max(ys) - min(ys), 1.0)
+    grid = _OutlineGrid(outline, max(span / 96.0, 0.5))
+    _GRID_CACHE.clear()
+    _GRID_CACHE[key] = grid
+    return grid
+
+
+def boundary_distance(
+    poly: list[Point], outline: list[Point], limit: float | None = None
+) -> float:
     """多边形到闭合轮廓（板框）的最小距离。
 
     与 ``polygon_distance`` 不同：即使多边形完全落在板框内部，也返回它到
     板框边缘的距离（后者对被包含的情形会返回 0）。
+
+    ``limit`` 用于"只关心是否小于阈值"的调用方：传入后若可确认最小距离
+    必然不小于 ``limit``，直接返回 ``limit`` 而不做精确求解（结果只会偏大，
+    用于 ``distance < limit`` 之类的比较是安全的）。
     """
     if len(outline) < 2 or len(poly) < 2:
         return 0.0
+    px0, py0, px1, py1 = _bbox_of(poly)
+
+    if limit is not None and limit > 0.0:
+        grid = _outline_grid(outline)
+        nearby = grid.near((px0, py0, px1, py1), limit)
+        if not nearby:
+            return limit
+        segments = [grid.segments[index] for index in nearby]
+    else:
+        segments = _outline_segments(outline)
+
     best = float("inf")
-    count = len(outline)
-    for index in range(count):
-        a = outline[index]
-        b = outline[(index + 1) % count]
-        for j in range(len(poly)):
-            c = poly[j]
-            d = poly[(j + 1) % len(poly)]
-            p1, p2 = _closest_pair_on_segments(a, b, c, d)
-            best = min(best, math.hypot(p1[0] - p2[0], p1[1] - p2[1]))
+    best_sq = best
+    npoly = len(poly)
+    for ax, ay, bx, by, min_x, min_y, max_x, max_y in segments:
+        # 边包围盒到多边形包围盒的下界；不小于当前最优就没有必要精确计算
+        dx = px0 - max_x if px0 > max_x else (min_x - px1 if min_x > px1 else 0.0)
+        dy = py0 - max_y if py0 > max_y else (min_y - py1 if min_y > py1 else 0.0)
+        if dx * dx + dy * dy >= best_sq:
+            continue
+        for j in range(npoly):
+            distance = _seg_distance(
+                (ax, ay), (bx, by), poly[j], poly[(j + 1) % npoly]
+            )
+            if distance < best:
+                best = distance
+                if best <= _EPS:
+                    return 0.0
+                best_sq = best * best
     return best
 
 
@@ -223,17 +322,37 @@ def polygon_distance(poly_a: Polygon, poly_b: Polygon) -> float:
 
 
 def nearest_points(poly_a: Polygon, poly_b: Polygon) -> tuple[Point, Point]:
-    """返回两个多边形最近点对，用于界面高亮。"""
+    """返回两个多边形最近点对，用于界面高亮。
+
+    板框这类几百段的长轮廓会先按包围盒下界剪枝，只对可能更近的边做精确计算。
+    """
+    ax0, ay0, ax1, ay1 = _bbox_of(poly_a)
+    # 预先把 b 的每条边连包围盒算好，剪枝时只做四次比较
+    edges_b: list[tuple[Point, Point, float, float, float, float]] = []
+    nb = len(poly_b)
+    for j in range(nb):
+        b1 = poly_b[j]
+        b2 = poly_b[(j + 1) % nb]
+        min_x, max_x = (b1[0], b2[0]) if b1[0] <= b2[0] else (b2[0], b1[0])
+        min_y, max_y = (b1[1], b2[1]) if b1[1] <= b2[1] else (b2[1], b1[1])
+        edges_b.append((b1, b2, min_x, min_y, max_x, max_y))
+
     best = float("inf")
+    best_sq = best
     pa, pb = poly_a[0], poly_b[0]
-    na, nb = len(poly_a), len(poly_b)
+    na = len(poly_a)
     for i in range(na):
-        a1, a2 = poly_a[i], poly_a[(i + 1) % na]
-        for j in range(nb):
-            b1, b2 = poly_b[j], poly_b[(j + 1) % nb]
-            d = _seg_distance(a1, a2, b1, b2)
-            if d < best:
-                best = d
+        a1 = poly_a[i]
+        a2 = poly_a[(i + 1) % na]
+        for b1, b2, min_x, min_y, max_x, max_y in edges_b:
+            dx = ax0 - max_x if ax0 > max_x else (min_x - ax1 if min_x > ax1 else 0.0)
+            dy = ay0 - max_y if ay0 > max_y else (min_y - ay1 if min_y > ay1 else 0.0)
+            if dx * dx + dy * dy >= best_sq:
+                continue
+            distance = _seg_distance(a1, a2, b1, b2)
+            if distance < best:
+                best = distance
+                best_sq = best * best
                 pa, pb = _closest_pair_on_segments(a1, a2, b1, b2)
     return pa, pb
 

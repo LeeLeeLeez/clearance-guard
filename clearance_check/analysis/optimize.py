@@ -221,8 +221,10 @@ def _conflicts(
                 return True
 
     if not burn_terminal and rules.board_edge_enabled and len(board.outline) >= 3:
+        edge_gap = rules.board_edge_gap_mm
         for item in moving:
-            if boundary_distance(item.polygon, board.outline) < rules.board_edge_gap_mm - EPS:
+            # 只比较大小，传 limit 让几何层能提前判定"离板边足够远"
+            if boundary_distance(item.polygon, board.outline, limit=edge_gap) < edge_gap - EPS:
                 return True
     return False
 
