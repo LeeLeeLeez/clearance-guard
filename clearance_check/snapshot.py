@@ -355,7 +355,7 @@ def _board_from_dict(data: dict[str, Any]) -> Board:
                 width=float(item.get("width") or 4.0),
                 height=float(item.get("height") or 4.0),
                 hole=float(item.get("hole") or 0.0),
-                net=str(item.get("net") or ""),
+                net=str(item.get("net") or "SGND"),
                 layer=str(item.get("layer") or "MULTI"),
                 net_class=_net_class(item.get("net_class")),
                 voltage=_opt_float(item.get("voltage")),

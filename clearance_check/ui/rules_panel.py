@@ -82,6 +82,14 @@ class RulesPanel(QWidget):
         grid.addWidget(note, len(ORDERED_NET_CLASSES) + 1, 0, 1, len(ORDERED_NET_CLASSES) + 1)
         for column in range(1, len(ORDERED_NET_CLASSES) + 1):
             grid.setColumnMinimumWidth(column, 108)
+        self.matrix_enabled = QCheckBox("启用类别矩阵间距检查（默认关闭）")
+        grid.addWidget(
+            self.matrix_enabled,
+            len(ORDERED_NET_CLASSES) + 1,
+            0,
+            1,
+            len(ORDERED_NET_CLASSES) + 2,
+        )
         grid.setColumnStretch(len(ORDERED_NET_CLASSES) + 2, 1)
         grid.setRowStretch(len(ORDERED_NET_CLASSES) + 2, 1)
         outer.addWidget(matrix_group, 3)
@@ -136,6 +144,12 @@ class RulesPanel(QWidget):
         self.step_mm.setSuffix(" mm")
         step_row.addWidget(self.step_v)
         step_row.addWidget(self.step_mm)
+        self.step_gran = QDoubleSpinBox()
+        self.step_gran.setRange(1, 5000)
+        self.step_gran.setValue(100)
+        self.step_gran.setSuffix(" V 一档")
+        self.step_gran.setToolTip("按最近档位四舍五入：差值 <50 V 向下、>=50 V 向上")
+        step_row.addWidget(self.step_gran)
         step_row.addStretch(1)
         form.addLayout(step_row, 6, 1)
 
@@ -153,6 +167,19 @@ class RulesPanel(QWidget):
             start=7,
         ):
             form.addWidget(box, index, 0, 1, 2)
+
+        form.addWidget(QLabel("安装孔间距（焊盘↔安装孔）"), 11, 0)
+        self.pad_mount_gap = _spin(0.4, 0.0, 5.0)
+        self.pad_mount_gap.setToolTip("器件焊盘铜箔外沿到已指派电位安装孔的最小距离")
+        form.addWidget(self.pad_mount_gap, 11, 1)
+        self.pad_mount_gap_enabled = QCheckBox("启用安装孔间距检查")
+        form.addWidget(self.pad_mount_gap_enabled, 12, 0, 1, 2)
+        form.addWidget(QLabel("同网络焊盘间距"), 13, 0)
+        self.same_net_gap = _spin(0.2, 0.0, 5.0)
+        self.same_net_gap.setToolTip("同一网络焊盘之间的最小距离（允许小于器件间 0.3）")
+        form.addWidget(self.same_net_gap, 13, 1)
+        self.same_net_gap_enabled = QCheckBox("启用同网络焊盘间距检查")
+        form.addWidget(self.same_net_gap_enabled, 14, 0, 1, 2)
         form.setColumnStretch(1, 1)
         right.addWidget(global_group)
 
@@ -221,8 +248,14 @@ class RulesPanel(QWidget):
         self.body_gap.setValue(rules.body_gap_mm)
         self.component_gap.setValue(rules.component_gap_mm)
         self.component_gap_enabled.setChecked(rules.component_gap_enabled)
+        self.pad_mount_gap.setValue(rules.pad_mount_gap_mm)
+        self.pad_mount_gap_enabled.setChecked(rules.pad_mount_gap_enabled)
+        self.same_net_gap.setValue(rules.same_net_gap_mm)
+        self.same_net_gap_enabled.setChecked(rules.same_net_gap_enabled)
+        self.matrix_enabled.setChecked(rules.matrix_enabled)
         self.step_enabled.setChecked(rules.voltage_step_enabled)
         self.step_v.setValue(rules.voltage_step_v)
+        self.step_gran.setValue(rules.voltage_step_granularity_v)
         self.step_mm.setValue(rules.voltage_step_mm)
         self.cross_class_only.setChecked(rules.cross_class_only)
         self.check_same_component.setChecked(rules.check_same_component)
@@ -236,15 +269,21 @@ class RulesPanel(QWidget):
             matrix[key] = round(box.value(), 3)
         return ClearanceRules(
             matrix=matrix,
+            matrix_enabled=self.matrix_enabled.isChecked(),
             isolation_gap_mm=round(self.isolation.value(), 3),
             isolation_clearance_mm=round(self.isolation_clearance.value(), 3),
             board_edge_gap_mm=round(self.board_edge_gap.value(), 3),
             body_gap_mm=round(self.body_gap.value(), 3),
             component_gap_mm=round(self.component_gap.value(), 3),
             component_gap_enabled=self.component_gap_enabled.isChecked(),
+            pad_mount_gap_mm=round(self.pad_mount_gap.value(), 3),
+            pad_mount_gap_enabled=self.pad_mount_gap_enabled.isChecked(),
+            same_net_gap_mm=round(self.same_net_gap.value(), 3),
+            same_net_gap_enabled=self.same_net_gap_enabled.isChecked(),
             voltage_step_enabled=self.step_enabled.isChecked(),
             voltage_step_v=round(self.step_v.value(), 2),
             voltage_step_mm=round(self.step_mm.value(), 2),
+            voltage_step_granularity_v=round(self.step_gran.value(), 2),
             cross_class_only=self.cross_class_only.isChecked(),
             check_same_component=self.check_same_component.isChecked(),
             include_tracks=self.include_tracks.isChecked(),

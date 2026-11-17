@@ -32,6 +32,21 @@ def _require_board() -> Any:
 
 
 # ------------------------------------------------------------ 校验
+def unassigned_mounts(mounts) -> list[str]:
+    """列出未指派网络的安装孔名：net 为空或电位仍是「未定」。"""
+    from clearance_check.model import NetClass
+
+    return [
+        str(getattr(m, "name", "") or "?")
+        for m in mounts or []
+        if getattr(m, "enabled", True)
+        and (
+            not str(getattr(m, "net", "") or "").strip()
+            or getattr(m, "net_class", None) is NetClass.UNKNOWN
+        )
+    ]
+
+
 def run_clearance() -> dict[str, Any]:
     from clearance_check.analysis.clearance import (
         aggregate_by_component,
@@ -44,6 +59,13 @@ def run_clearance() -> dict[str, Any]:
         classes = dict(STATE.classifications)
         mounts = list(getattr(board, "mounts", []) or [])
         parts = list(getattr(board, "floating_parts", []) or [])
+
+    missing = unassigned_mounts(mounts)
+    if missing:
+        raise ServiceError(
+            "以下安装孔未指派网络（应指派 SGND），请先在「安装焊盘」页处理后再校验："
+            + "、".join(missing)
+        )
 
     started = time.time()
     try:

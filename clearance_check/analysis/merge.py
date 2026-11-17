@@ -103,6 +103,8 @@ def merge_mounts(current: list[MountPoint], previous: list[MountPoint]) -> int:
             continue
         mount.net_class = (NetClass.SECONDARY if old.net_class is NetClass.UNKNOWN
                            else old.net_class)
+        # 指派网络也沿用旧基线（旧数据为空时保留新扫描的默认 SGND）
+        mount.net = old.net or mount.net
         mount.voltage = old.voltage
         mount.voltage_min = old.voltage_min
         mount.voltage_max = old.voltage_max

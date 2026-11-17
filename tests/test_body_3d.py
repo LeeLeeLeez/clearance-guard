@@ -87,3 +87,76 @@ def test_body_vs_bbox_when_one_side_has_no_3d_body():
     violations = find_violations(board, classifications, ClearanceRules())
     hits = [v for v in violations if "本体" in v.rule_name]
     assert hits, "本体与占位框重叠时必须报出（不能退回只看焊盘）"
+
+
+def test_mirror_body_swap_is_corrected():
+    """正反面镜像、几乎重叠的两颗器件被贪心对调本体时，按组内偏移共识纠正。"""
+    from clearance_check.eda.session import _fix_body_offset_outliers
+
+    board = Board(name="mirror")
+    xs = (10.0, 20.0, 30.0)
+    for i, x in enumerate(xs):
+        board.add_component(Component(designator=f"QB{i}", x=x, y=10.0,
+                                      layer="BOTTOM", rotation=270.0,
+                                      footprint="TO252", bbox=(x - 2, 8, x + 2, 12)))
+        board.add_component(Component(designator=f"QT{i}", x=x, y=10.025,
+                                      layer="TOP", rotation=90.0,
+                                      footprint="TO252", bbox=(x - 2, 8, x + 2, 12)))
+
+    body_list = []
+    for x in xs:
+        body_list.append({"x1": x - 1.6, "y1": 9.88 - 1.6, "x2": x + 1.6, "y2": 9.88 + 1.6})
+        body_list.append({"x1": x - 1.6, "y1": 10.145 - 1.6,
+                          "x2": x + 1.6, "y2": 10.145 + 1.6})
+
+    assigned = {}
+    for i, x in enumerate(xs):
+        assigned[f"QB{i}"] = (0.0, (x - 1.6, 9.88 - 1.6, x + 1.6, 9.88 + 1.6))
+        assigned[f"QT{i}"] = (0.0, (x - 1.6, 10.145 - 1.6, x + 1.6, 10.145 + 1.6))
+    # 制造一次镜像对调（模拟贪心把两颗的本体互换）
+    assigned["QB1"], assigned["QT1"] = assigned["QT1"], assigned["QB1"]
+
+    fixed = _fix_body_offset_outliers(board, assigned, body_list)
+    assert fixed >= 1
+
+    for i in range(3):
+        qb, qt = board.components[f"QB{i}"], board.components[f"QT{i}"]
+        box_b = assigned[f"QB{i}"][1]
+        box_t = assigned[f"QT{i}"][1]
+        cy_b = (box_b[1] + box_b[3]) / 2
+        cy_t = (box_t[1] + box_t[3]) / 2
+        assert abs(cy_b - qb.y + 0.12) < 1e-6, (i, cy_b, qb.y)
+        assert abs(cy_t - qt.y - 0.12) < 1e-6, (i, cy_t, qt.y)
+
+
+def test_symmetric_body_shared_by_mirror_pair():
+    """对称封装的正反面镜像件共用同一个 3D 本体框（去重后只剩一个也要共享）。"""
+    from clearance_check.eda.session import _share_symmetric_bodies
+
+    board = Board(name="share")
+    for d, layer in (("U15", "BOTTOM"), ("U16", "TOP")):
+        board.add_component(Component(designator=d, x=10.0, y=10.0, layer=layer,
+                                      footprint="WSON8", rotation=180.0,
+                                      bbox=(8.5, 8.5, 11.5, 11.5)))
+    box = (9.0, 9.0, 11.0, 11.0)
+    assigned = {"U15": (0.0, box)}
+    added = _share_symmetric_bodies(board, assigned)
+    assert added == 1
+    assert assigned["U16"][1] == box
+
+
+def test_symmetric_share_requires_same_footprint():
+    """同位置但不同封装的小件，不该继承大器件的本体。"""
+    from clearance_check.eda.session import _share_symmetric_bodies
+
+    board = Board(name="noshar")
+    board.add_component(Component(designator="U15", x=10.0, y=10.0, layer="BOTTOM",
+                                  footprint="WSON8", rotation=180.0,
+                                  bbox=(8.5, 8.5, 11.5, 11.5)))
+    board.add_component(Component(designator="C9", x=10.0, y=10.0, layer="TOP",
+                                  footprint="C0402", rotation=0.0,
+                                  bbox=(9.5, 9.5, 10.5, 10.5)))
+    box = (9.0, 9.0, 11.0, 11.0)
+    assigned = {"U15": (0.0, box)}
+    _share_symmetric_bodies(board, assigned)
+    assert "C9" not in assigned

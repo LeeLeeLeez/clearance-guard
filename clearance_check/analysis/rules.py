@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -40,6 +41,8 @@ class ClearanceRules:
     """用户可编辑的间距规则。"""
 
     matrix: dict[tuple[NetClass, NetClass], float] = field(default_factory=default_matrix)
+    #: 类别矩阵是否参与判定。默认关闭：由器件间 0.3 / 同网络 0.2 / 隔离带 / 安装孔覆盖
+    matrix_enabled: bool = False
     #: 隔离带爬电距离（沿面，默认 8 mm）——没有避距槽时的要求
     isolation_gap_mm: float = 8.0
     #: 隔离带电气间隙（跨避距槽时的直线空气距离，默认 6 mm）
@@ -47,6 +50,8 @@ class ClearanceRules:
     voltage_step_enabled: bool = True
     voltage_step_v: float = 100.0
     voltage_step_mm: float = 0.5
+    #: 电压差档位粒度（默认 100 V 一档；不足一档向上取一档，按 voltage_step_v/mm 折算）
+    voltage_step_granularity_v: float = 100.0
     check_unknown: bool = True
     include_tracks: bool = False
     cross_class_only: bool = False
@@ -60,6 +65,12 @@ class ClearanceRules:
     #: 器件 3D 本体之间的最小间距（按桥接读到的本体外形投影判定）
     body_gap_mm: float = 0.3
     body_gap_enabled: bool = True
+    #: 器件焊盘（铜箔外沿）到安装孔（已指派电位）的最小距离（mm）
+    pad_mount_gap_mm: float = 0.4
+    pad_mount_gap_enabled: bool = True
+    #: 同一网络焊盘之间的最小间距（mm）：同网络允许比器件间 0.3 更小
+    same_net_gap_mm: float = 0.2
+    same_net_gap_enabled: bool = True
 
     # ---- 查询 -----------------------------------------------------
     def base_gap(self, a: NetClass, b: NetClass) -> float:
@@ -83,10 +94,14 @@ class ClearanceRules:
         ``slot_bridge=True``：两点之间被避距槽隔开且绕槽沿面长度已达标，
         隔离带按**电气间隙**（直线）判；否则按**爬电距离**（沿面）判。
         """
-        gap = self.base_gap(a, b)
-        rule = (
-            f"类别矩阵：{NET_CLASS_SHORT_LABELS[a]} / {NET_CLASS_SHORT_LABELS[b]}"
-        )
+        if self.matrix_enabled:
+            gap = self.base_gap(a, b)
+            rule = (
+                f"类别矩阵：{NET_CLASS_SHORT_LABELS[a]} / {NET_CLASS_SHORT_LABELS[b]}"
+            )
+        else:
+            gap = 0.0
+            rule = "类别间距（已关闭）"
 
         if self.is_isolation_pair(a, b):
             # 原副边只认专用的隔离规则：没有槽时按爬电（8 mm），
@@ -100,15 +115,25 @@ class ClearanceRules:
                 else f"隔离带爬电距离（沿面）{gap:g} mm"
             )
 
-        if self.voltage_step_enabled and self.voltage_step_v > 0:
+        # 副边 ↔ 副边不考虑电压差增量：副边内部只按同网络 / 器件间等基础规则判
+        secondary_pair = a is NetClass.SECONDARY and b is NetClass.SECONDARY
+        if (
+            self.voltage_step_enabled
+            and self.voltage_step_v > 0
+            and not secondary_pair
+        ):
             delta = abs((va or 0.0) - (vb or 0.0))
-            steps = int(delta // self.voltage_step_v)
-            extra = steps * self.voltage_step_mm
+            gran = self.voltage_step_granularity_v
+            if gran <= 0 or gran > self.voltage_step_v:
+                gran = self.voltage_step_v
+            # 100 V 一档，按最近档位四舍五入：差值 <50 V 向下、>=50 V 向上
+            steps = int(math.floor(delta / gran + 0.5 + 1e-9))
+            extra = steps * gran * (self.voltage_step_mm / self.voltage_step_v)
             if extra > gap + 1e-9:
                 gap = extra
                 rule = (
-                    f"电压差 {delta:.0f} V"
-                    f"（每 {self.voltage_step_v:g} V +{self.voltage_step_mm:g} mm）"
+                    f"电压差 {delta:.0f} V（{gran:g} V 一档，"
+                    f"每 {self.voltage_step_v:g} V +{self.voltage_step_mm:g} mm）"
                 )
 
         return round(gap, 3), rule
@@ -116,6 +141,7 @@ class ClearanceRules:
     # ---- 存取 -----------------------------------------------------
     def to_dict(self) -> dict:
         return {
+            "matrix_enabled": self.matrix_enabled,
             "matrix": {
                 f"{a.value}|{b.value}": round(float(value), 3)
                 for (a, b), value in self.matrix.items()
@@ -125,6 +151,7 @@ class ClearanceRules:
             "voltage_step_enabled": self.voltage_step_enabled,
             "voltage_step_v": self.voltage_step_v,
             "voltage_step_mm": self.voltage_step_mm,
+            "voltage_step_granularity_v": self.voltage_step_granularity_v,
             "check_unknown": self.check_unknown,
             "include_tracks": self.include_tracks,
             "cross_class_only": self.cross_class_only,
@@ -135,6 +162,10 @@ class ClearanceRules:
             "body_gap_mm": self.body_gap_mm,
             "body_gap_enabled": self.body_gap_enabled,
             "component_gap_enabled": self.component_gap_enabled,
+            "pad_mount_gap_mm": self.pad_mount_gap_mm,
+            "pad_mount_gap_enabled": self.pad_mount_gap_enabled,
+            "same_net_gap_mm": self.same_net_gap_mm,
+            "same_net_gap_enabled": self.same_net_gap_enabled,
         }
 
     @classmethod
@@ -149,6 +180,7 @@ class ClearanceRules:
                 continue
         if matrix:
             rules.matrix = matrix
+        rules.matrix_enabled = bool(data.get("matrix_enabled", rules.matrix_enabled))
         rules.isolation_gap_mm = float(data.get("isolation_gap_mm", rules.isolation_gap_mm))
         rules.isolation_clearance_mm = float(
             data.get("isolation_clearance_mm", rules.isolation_clearance_mm)
@@ -156,6 +188,9 @@ class ClearanceRules:
         rules.voltage_step_enabled = bool(data.get("voltage_step_enabled", rules.voltage_step_enabled))
         rules.voltage_step_v = float(data.get("voltage_step_v", rules.voltage_step_v))
         rules.voltage_step_mm = float(data.get("voltage_step_mm", rules.voltage_step_mm))
+        rules.voltage_step_granularity_v = float(
+            data.get("voltage_step_granularity_v", rules.voltage_step_granularity_v)
+        )
         rules.check_unknown = bool(data.get("check_unknown", rules.check_unknown))
         rules.include_tracks = bool(data.get("include_tracks", rules.include_tracks))
         rules.cross_class_only = bool(data.get("cross_class_only", rules.cross_class_only))
@@ -171,6 +206,14 @@ class ClearanceRules:
         rules.body_gap_enabled = bool(data.get("body_gap_enabled", rules.body_gap_enabled))
         rules.component_gap_enabled = bool(
             data.get("component_gap_enabled", rules.component_gap_enabled)
+        )
+        rules.pad_mount_gap_mm = float(data.get("pad_mount_gap_mm", rules.pad_mount_gap_mm))
+        rules.pad_mount_gap_enabled = bool(
+            data.get("pad_mount_gap_enabled", rules.pad_mount_gap_enabled)
+        )
+        rules.same_net_gap_mm = float(data.get("same_net_gap_mm", rules.same_net_gap_mm))
+        rules.same_net_gap_enabled = bool(
+            data.get("same_net_gap_enabled", rules.same_net_gap_enabled)
         )
         return rules
 

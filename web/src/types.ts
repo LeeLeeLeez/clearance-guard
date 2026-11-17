@@ -40,7 +40,14 @@ export interface Summary {
   counts?: Counts
   net_classes?: Record<string, number>
   sheets?: SheetInfo[]
-  violations?: { total: number; components: number; errors: number; warnings: number }
+  violations?: {
+    total: number
+    components: number
+    errors: number
+    warnings: number
+    component_errors?: number
+    component_warnings?: number
+  }
   warnings?: string[]
 }
 
@@ -175,11 +182,13 @@ export interface ObjectsResp {
 
 export interface RulesResp {
   matrix: Record<string, number>
+  matrix_enabled: boolean
   isolation_gap_mm: number
   isolation_clearance_mm: number
   voltage_step_enabled: boolean
   voltage_step_v: number
   voltage_step_mm: number
+  voltage_step_granularity_v: number
   check_unknown: boolean
   include_tracks: boolean
   cross_class_only: boolean
@@ -190,6 +199,10 @@ export interface RulesResp {
   component_gap_enabled: boolean
   body_gap_mm: number
   body_gap_enabled: boolean
+  pad_mount_gap_mm: number
+  pad_mount_gap_enabled: boolean
+  same_net_gap_mm: number
+  same_net_gap_enabled: boolean
   matrix_keys: string[]
   [key: string]: unknown
 }
@@ -235,6 +248,20 @@ export interface ViolationsResp {
   }
 }
 
+/** 布局视图里的扫描框（板坐标 mm）；null 表示未设置。 */
+export interface ScanBox {
+  x1: number
+  y1: number
+  x2: number
+  y2: number
+}
+
+export interface ScanBoxResp {
+  box: ScanBox | null
+  board_bbox: [number, number, number, number] | null
+  clamped?: boolean
+}
+
 export interface LayoutData {
   scanned: boolean
   board_name: string
@@ -265,6 +292,19 @@ export interface LayoutData {
     cls_label: string
     hole: number
   }[]
+  mounts: {
+    name: string
+    x: number
+    y: number
+    outer: number
+    hole: number
+    net: string
+    layer: string
+    cls: string
+    cls_label: string
+    assigned: boolean
+    enabled: boolean
+  }[]
   cutouts: {
     kind: string
     name: string
@@ -282,19 +322,14 @@ export interface LayoutData {
     b: string
     deficit: number
     severity: string
-    /** 网络 A / B（悬停提示） */
-    net_a: string
-    net_b: string
-    /** 电压类别标签 */
-    class_a: string
-    class_b: string
-    /** 实测 / 要求间距（mm） */
-    actual: number
-    required: number
-    /** 依据规则 */
-    rule: string
-    /** 同一器件对涉及的焊盘对数 */
-    count: number
+    net_a?: string
+    net_b?: string
+    class_a?: string
+    class_b?: string
+    actual?: number
+    required?: number
+    rule?: string
+    count?: number
   }[]
   class_labels: Record<string, string>
 }

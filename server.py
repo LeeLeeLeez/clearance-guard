@@ -120,7 +120,21 @@ def _h_reveal(h, q, body):
 
 
 def _h_scan_pcb(h, q, body):
-    return scan_service.start_scan_pcb(str((body or {}).get("project_path") or ""))
+    b = body or {}
+    return scan_service.start_scan_pcb(
+        str(b.get("project_path") or ""),
+        region=b.get("region"),
+        use_scan_box=bool(b.get("use_scan_box")),
+        local=str(b.get("mode") or "") == "local",
+    )
+
+
+def _h_scan_box_get(h, q, body):
+    return scan_service.get_scan_box()
+
+
+def _h_scan_box_set(h, q, body):
+    return scan_service.set_scan_box((body or {}).get("box"))
 
 
 def _h_components(h, q, body):
@@ -140,6 +154,10 @@ def _h_scan_cancel(h, q, body):
 
 def _h_task(h, q, body):
     return scan_service.task_status()
+
+
+def _h_recover(h, q, body):
+    return scan_service.recover_bridge()
 
 
 def _h_demo(h, q, body):
@@ -287,9 +305,12 @@ ROUTES = {
     ("POST", "/api/dialog/save"): _h_dialog_save,
     ("POST", "/api/reveal"): _h_reveal,
     ("POST", "/api/scan-pcb"): _h_scan_pcb,
+    ("GET", "/api/scan-box"): _h_scan_box_get,
+    ("POST", "/api/scan-box"): _h_scan_box_set,
     ("GET", "/api/components"): _h_components,
     ("POST", "/api/component"): _h_component_update,
     ("GET", "/api/task"): _h_task,
+    ("POST", "/api/recover"): _h_recover,
     ("POST", "/api/demo"): _h_demo,
     ("POST", "/api/snapshot/export"): _h_snapshot_export,
     ("POST", "/api/snapshot/import"): _h_snapshot_import,

@@ -102,6 +102,10 @@ class AppState:
     baseline: dict = field(default_factory=dict)
     baseline_mounts: list = field(default_factory=list)
     baseline_name: str = ""
+    #: 布局视图里的扫描框（mm，板坐标）：区域重扫只保留框内对象
+    scan_box: Any = None
+    #: 最近一次整板扫描的完整 Board（局部刷新以它为基线，避免整板重读）
+    base_board: Any = None
 
     project_path: str = ""
     source_note: str = ""
@@ -242,6 +246,13 @@ def board_summary() -> dict[str, Any]:
             "components": len(STATE.aggregated),
             "errors": len([v for v in STATE.violations if getattr(v, "severity", "") == "error"]),
             "warnings": len([v for v in STATE.violations if getattr(v, "severity", "") != "error"]),
+            # 器件级（同一器件对的多对焊盘已合并）错误/警告，避免与焊盘级口径混淆
+            "component_errors": len(
+                [v for v in STATE.aggregated if getattr(v, "severity", "") == "error"]
+            ),
+            "component_warnings": len(
+                [v for v in STATE.aggregated if getattr(v, "severity", "") != "error"]
+            ),
         },
         "warnings": list(getattr(board, "warnings", []) or [])[:30],
     }
@@ -304,6 +315,7 @@ def board_for_view() -> dict[str, Any]:
         classes = dict(STATE.classifications)
         violations = list(STATE.aggregated)
         cutouts = list(getattr(board, "cutouts", []) or []) if board else []
+        mounts = list(getattr(board, "mounts", []) or []) if board else []
 
     if board is None:
         return {"scanned": False}
@@ -354,7 +366,7 @@ def board_for_view() -> dict[str, Any]:
             "b": v.designator_b,
             "deficit": round(float(getattr(v, "deficit_mm", 0.0) or 0.0), 3),
             "severity": v.severity,
-            # 悬停提示用的明细：网络 / 类别 / 实测与要求 / 依据规则 / 焊盘对数
+            # 悬停提示用的明细（网络 / 类别 / 实测与要求 / 依据规则 / 焊盘对数）
             "net_a": v.net_a,
             "net_b": v.net_b,
             "class_a": label_of.get(getattr(v.class_a, "value", ""), ""),
@@ -375,6 +387,27 @@ def board_for_view() -> dict[str, Any]:
         "outline": [[round(x, 3), round(y, 3)] for x, y in (getattr(board, "outline", []) or [])],
         "components": components,
         "pads": pads,
+        "mounts": [
+            {
+                "name": getattr(m, "name", ""),
+                "x": round(float(getattr(m, "x", 0) or 0), 3),
+                "y": round(float(getattr(m, "y", 0) or 0), 3),
+                "outer": round(
+                    max(float(getattr(m, "width", 0) or 0), float(getattr(m, "height", 0) or 0)), 3
+                ),
+                "hole": round(float(getattr(m, "hole", 0) or 0), 3),
+                "net": getattr(m, "net", ""),
+                "layer": getattr(m, "layer", "MULTI"),
+                "cls": getattr(getattr(m, "net_class", None), "value", "")
+                if getattr(m, "net_class", None) else "",
+                "cls_label": label_of.get(
+                    getattr(getattr(m, "net_class", None), "value", ""), ""
+                ),
+                "assigned": bool(getattr(m, "assigned", False)),
+                "enabled": bool(getattr(m, "enabled", True)),
+            }
+            for m in mounts
+        ],
         "cutouts": [
             {
                 "kind": c.kind,
@@ -387,6 +420,7 @@ def board_for_view() -> dict[str, Any]:
                 "points": [[round(px, 3), round(py, 3)] for px, py in (c.points or [])],
             }
             for c in cutouts
+            if c.kind != "circle"  # 圆形挖孔已由安装焊盘圆环表示，避免重复画
         ],
         "violations": marks,
         "class_labels": label_of,

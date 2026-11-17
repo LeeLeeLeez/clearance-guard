@@ -182,6 +182,23 @@ function Shell() {
     }
   }
 
+  /** 只重扫布局视图里框选的那块区域（框外对象忽略）。 */
+  const onScanBoxPcb = async () => {
+    try {
+      await api.post('/api/scan-pcb', {
+        project_path: projectPath,
+        use_scan_box: true,
+        mode: 'local',
+      })
+      setStatusMsg('正在局部刷新扫描框内器件，完成后自动重新校验…')
+      toast.success('已提交：只刷新框内器件，完成后自动重新校验')
+    } catch (e) {
+      const msg = errText(e)
+      setStatusError(msg)
+      toast.danger(msg)
+    }
+  }
+
   const onCancel = async () => {
     try {
       await api.post('/api/scan-cancel')
@@ -388,6 +405,16 @@ function Shell() {
                   >
                     扫描pcb
                   </Button>
+                  <Button
+                    size="sm"
+                    variant="soft"
+                    onClick={onScanBoxPcb}
+                    loading={busy && tasks?.kind === 'scan_pcb'}
+                    disabled={!status?.connected || !scanned || busy}
+                    title="只读取扫描框内器件的坐标/焊盘并刷新，框外沿用整板基线；比整板重读快很多"
+                  >
+                    扫描框PCB重扫
+                  </Button>
                   {busy && (
                     <Button size="sm" variant="ghost" onClick={onCancel}>
                       取消
@@ -461,9 +488,20 @@ function Shell() {
                 <div
                   className="metric"
                   data-tone={(summary?.violations?.errors ?? 0) > 0 ? 'danger' : 'ok'}
+                  title="焊盘级：一个器件对可能有多对焊盘各自的违规"
                 >
-                  <span className="metric__label">违规（ERROR）</span>
+                  <span className="metric__label">焊盘级 ERROR</span>
                   <span className="metric__value">{summary?.violations?.errors ?? '—'}</span>
+                </div>
+                <div
+                  className="metric"
+                  data-tone={(summary?.violations?.component_errors ?? 0) > 0 ? 'danger' : 'ok'}
+                  title="器件级：同一器件对的多对焊盘合并后只留最严重的一条"
+                >
+                  <span className="metric__label">器件级 ERROR</span>
+                  <span className="metric__value">
+                    {summary?.violations?.component_errors ?? '—'}
+                  </span>
                 </div>
               </div>
             </CardBody>

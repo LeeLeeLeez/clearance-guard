@@ -163,7 +163,7 @@ class MountPoint:
     width: float = 4.0
     height: float = 4.0
     hole: float = 0.0
-    net: str = ""            # 板上原有网络（可能为空）
+    net: str = "SGND"        # 指派网络：默认为信号地 SGND（副边）
     layer: str = "MULTI"
     net_class: NetClass = NetClass.SECONDARY   # 机械结构默认按副边处理
     voltage: float | None = None
@@ -178,7 +178,12 @@ class MountPoint:
 
     @property
     def assigned(self) -> bool:
-        return self.enabled and self.net_class is not NetClass.UNKNOWN
+        # 「已指派」要同时满足：启用、网络非空、电位不是「未定」
+        return (
+            self.enabled
+            and bool((self.net or "").strip())
+            and self.net_class is not NetClass.UNKNOWN
+        )
 
 
 @dataclass

@@ -219,12 +219,12 @@ export default function ViolationPage({ setStatus, setStatusError, active, revis
           />
           <Stat
             variant="card"
-            label="ERROR"
+            label="器件级 ERROR"
             value={String(summary?.components.errors ?? '—')}
           />
           <Stat
             variant="card"
-            label="WARNING"
+            label="器件级 WARNING"
             value={String(summary?.components.warnings ?? '—')}
           />
           <Stat

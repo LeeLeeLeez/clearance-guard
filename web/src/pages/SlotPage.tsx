@@ -18,7 +18,9 @@ import { api, errText } from '../api'
 import type { CutoutRow, ObjectsResp, PageProps } from '../types'
 
 const ROLE_LABEL: Record<string, string> = {
-  slot: '避距槽',
+  creepage: '避距槽',
+  slot: '避距槽', // 旧写法，读取时归一化成 creepage
+  footprint: '封装挖空',
   frame: '板框',
   hole: '圆形孔',
   ignore: '忽略',
@@ -33,8 +35,12 @@ export default function SlotPage({ setStatus, setStatusError, active, revision }
   const load = useCallback(async () => {
     try {
       const r = await api.get<ObjectsResp>('/api/objects')
-      setRows(r.cutouts || [])
-      setCurrent((cur) => (cur === null && r.cutouts?.length ? r.cutouts[0].index : cur))
+      // 历史数据里的 slot 统一显示成 creepage，避免下拉框选不中
+      const rows = (r.cutouts || []).map((c) =>
+        c.role === 'slot' ? { ...c, role: 'creepage' } : c,
+      )
+      setRows(rows)
+      setCurrent((cur) => (cur === null && rows.length ? rows[0].index : cur))
     } catch (e) {
       setStatusError(errText(e))
     }
@@ -114,8 +120,8 @@ export default function SlotPage({ setStatus, setStatusError, active, revision }
           value={r.role || ''}
           options={[
             { value: '', label: '未判定' },
-            { value: 'slot', label: '避距槽' },
-            { value: 'hole', label: '圆形孔' },
+            { value: 'creepage', label: '避距槽' },
+            { value: 'footprint', label: '封装挖空' },
             { value: 'frame', label: '板框' },
             { value: 'ignore', label: '忽略' },
           ]}
@@ -137,7 +143,7 @@ export default function SlotPage({ setStatus, setStatusError, active, revision }
   ]
 
   const cut = rows.find((r) => r.index === current)
-  const slots = rows.filter((r) => (r.role || 'slot') === 'slot')
+  const slots = rows.filter((r) => r.role === 'creepage')
 
   return (
     <Page size="full">
@@ -150,7 +156,7 @@ export default function SlotPage({ setStatus, setStatusError, active, revision }
         <Card>
           <CardHeader
             title="避距槽列表"
-            description={`${slots.length} 个避距槽 / 共 ${rows.length} 个挖空`}
+            description={`${slots.length} 个避距槽 / 共 ${rows.length} 个板级挖空（圆形孔已归入安装焊盘，不在此列出）`}
             actions={
               <Button size="sm" variant="accent" onClick={loadOutlines} loading={busy}>
                 读取轮廓坐标

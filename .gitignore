@@ -7,4 +7,3 @@ backup/
 build/
 dist/
 *.spec.bak
-node_modules/

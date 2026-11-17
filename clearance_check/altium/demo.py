@@ -161,7 +161,7 @@ def build_demo_board() -> tuple[Board, list[dict]]:
                 width=8.0,
                 height=8.0,
                 hole=3.2,
-                net="",
+                net="SGND",
                 layer="MULTI",
                 note="示例安装孔（M3）",
             )

@@ -199,6 +199,9 @@ def reclassify() -> dict[str, Any]:
     fresh = classify_board(board, pins)
     with STATE.lock:
         STATE.classifications = fresh
+        STATE.baseline = {}
+        STATE.baseline_mounts = []
+        STATE.baseline_name = ""
     _recompute_references()
     STATE.log(f"已重新自动分类：{len(fresh)} 个网络")
     return {"ok": True, "count": len(fresh)}
@@ -349,6 +352,10 @@ def objects() -> dict[str, Any]:
         )
     cutouts = []
     for i, c in enumerate(getattr(board, "cutouts", []) or []):
+        if c.kind == "circle":
+            # 圆形挖孔已作为安装焊盘（CH*）显示，不在避距槽列表里重复出现；
+            # 这里只跳过展示，index 仍是原数组下标，改归属不会错位。
+            continue
         cutouts.append(
             {
                 "index": i,
@@ -479,7 +486,20 @@ def update_cutout(index: int, patch: dict[str, Any]) -> dict[str, Any]:
     if not (0 <= index < len(cutouts)):
         raise ServiceError("挖空序号越界")
     if "role" in patch:
-        cutouts[index].role = str(patch["role"] or "")
+        role = str(patch["role"] or "").strip().lower()
+        # 兼容旧前端：避距槽历史写法是 slot，分析侧规范值是 creepage
+        if role == "slot":
+            role = "creepage"
+        outline = list(getattr(board, "outline", None) or [])
+        if role == "creepage" and len(outline) >= 3:
+            xs = [p[0] for p in outline]
+            ys = [p[1] for p in outline]
+            bw = max(xs) - min(xs)
+            bh = max(ys) - min(ys)
+            x1, y1, x2, y2 = cutouts[index].bbox
+            if abs(x2 - x1) >= 0.9 * bw and abs(y2 - y1) >= 0.9 * bh:
+                raise ServiceError("这是整板板框，不能设为避距槽；请选「板框」或「忽略」")
+        cutouts[index].role = role
     return {"ok": True}
 
 
@@ -491,20 +511,36 @@ def _outline_job(board_path: str) -> None:
             raise ServiceError("还没有连接 Altium")
         task.stage = "读取轮廓"
         task.detail = "遍历整板铜箔，大板约 30 秒…"
-        pairs = sess.cutout_outlines(board_path=board_path) or []
-        idx = {i: c for i, c in enumerate(getattr(STATE.board, "cutouts", []) or [])}
+        # cutout_outlines() 返回的是轮廓字典（points/x/y/width/height），
+        # 按中心 + 尺寸匹配到具体避距槽，而不是按下标一一对应。
+        outlines = sess.cutout_outlines(board_path=board_path) or []
+        cutouts = list(getattr(STATE.board, "cutouts", []) or [])
+        candidates = [
+            {
+                "index": i,
+                "x": c.x,
+                "y": c.y,
+                "width": c.width,
+                "height": c.height,
+                "cut": c,
+            }
+            for i, c in enumerate(cutouts)
+            if (getattr(c, "role", "") or "") in ("creepage", "slot")
+        ]
         matched = 0
-        for pair in pairs:
-            try:
-                cutout_index, points = pair
-            except (TypeError, ValueError):
+        for outline in outlines:
+            if not isinstance(outline, dict):
                 continue
-            cut = idx.get(int(cutout_index))
-            if cut is None:
+            hit = sess.match_outline(candidates, outline)
+            if hit is None:
                 continue
-            cut.points = [(float(p[0]), float(p[1])) for p in (points or [])]
+            hit["cut"].points = [
+                (float(p[0]), float(p[1])) for p in (outline.get("points") or [])
+            ]
             matched += 1
-        STATE.log(f"已读取 {matched} 个挖空的轮廓坐标")
+        STATE.log(
+            f"已读取 {matched} 个避距槽的轮廓坐标（共扫描到 {len(outlines)} 条轮廓）"
+        )
         task.finished = True
     except Exception as exc:  # noqa: BLE001
         task.error = str(exc)

@@ -24,49 +24,6 @@ const LABEL: Record<string, string> = {
   SECONDARY: '副边',
 }
 
-/**
- * 数字输入框：输入过程用本地草稿，失焦或回车才提交。
- *
- * oink-ui 的 Input 是受控组件（onChange 给的是新值字符串），如果直接把
- * rules 里的值绑回 value、onChange 又什么都不做，按键会被立刻回滚成旧值。
- */
-function NumField({
-  value,
-  onCommit,
-}: {
-  value: string | number | undefined
-  onCommit: (value: string) => void
-}) {
-  const text = value === undefined ? '' : String(value)
-  const [draft, setDraft] = useState(text)
-
-  useEffect(() => {
-    setDraft(text)
-  }, [text])
-
-  return (
-    <Input
-      size="sm"
-      value={draft}
-      onChange={(next) => setDraft(next)}
-      onBlur={() => {
-        const next = draft.trim()
-        if (next === text) return
-        // 空值或非数字直接还原，避免后端 float('') 解析失败后静默丢弃整次修改
-        if (next === '' || !Number.isFinite(Number(next))) {
-          setDraft(text)
-          return
-        }
-        onCommit(next)
-      }}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
-        if (e.key === 'Escape') setDraft(text)
-      }}
-    />
-  )
-}
-
 export default function RulesPage({ setStatus, setStatusError, active, revision }: PageProps) {
   const [rules, setRules] = useState<RulesResp | null>(null)
   const [busy, setBusy] = useState(false)
@@ -161,9 +118,14 @@ export default function RulesPage({ setStatus, setStatusError, active, revision 
   }
 
   const num = (key: keyof RulesResp) => (
-    <NumField
-      value={rules[key] as string | number | undefined}
-      onCommit={(value) => patch({ [key]: value })}
+    <Input
+      size="sm"
+      value={String(rules[key] ?? '')}
+      onChange={() => undefined}
+      onBlur={(e) => {
+        const v = (e.target as HTMLInputElement).value.trim()
+        if (v !== String(rules[key] ?? '')) patch({ [key]: v })
+      }}
     />
   )
 
@@ -175,18 +137,25 @@ export default function RulesPage({ setStatus, setStatusError, active, revision 
     <Page size="full">
       <PageHeader
         title="间距规则"
-        description="类别矩阵 + 隔离带爬电/电气间隙 + 电压差增量 + 器件本体与板边间距；改动立即保存"
+        description="器件间 / 同网络 / 隔离带 / 板边·本体·安装孔 + 电压差增量；类别矩阵默认关闭；改动立即保存"
       />
 
       <div className="pg-col">
         <Card>
           <CardHeader
             title="类别间距矩阵（mm）"
-            description="同类 0.20 / 原边恒定↔跳变 0.50 / 原边↔副边 = 隔离带（8.00）"
+            description="默认关闭：由器件间 0.3 / 同网络 0.2 / 隔离带 8·6 / 安装孔 0.4 覆盖；开启后矩阵值参与判定"
             actions={
-              <Button size="sm" variant="ghost" onClick={load} loading={busy}>
-                重新读取
-              </Button>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <span style={{ fontSize: 12, color: 'var(--ok-text-2)' }}>启用类别矩阵</span>
+                <Switch
+                  checked={Boolean(rules.matrix_enabled)}
+                  onChange={(v) => patch({ matrix_enabled: v })}
+                />
+                <Button size="sm" variant="ghost" onClick={load} loading={busy}>
+                  重新读取
+                </Button>
+              </div>
             }
           />
           <CardBody>
@@ -214,7 +183,15 @@ export default function RulesPage({ setStatus, setStatusError, active, revision 
                         const value = rules.matrix?.[key]
                         return (
                           <td key={col} style={{ padding: '4px 8px', width: 140 }}>
-                            <NumField value={value} onCommit={(next) => patchMatrix(row, col, next)} />
+                            <Input
+                              size="sm"
+                              value={value === undefined ? '' : String(value)}
+                              onChange={() => undefined}
+                              onBlur={(e) => {
+                                const v = (e.target as HTMLInputElement).value.trim()
+                                if (v !== String(value ?? '')) patchMatrix(row, col, v)
+                              }}
+                            />
                           </td>
                         )
                       })}
@@ -243,18 +220,28 @@ export default function RulesPage({ setStatus, setStatusError, active, revision 
             </Card>
 
             <Card>
-              <CardHeader title="电压差增量" description="与矩阵取较大者（375 V 对 0 V 这类场景）" />
+              <CardHeader
+                title="电压差增量"
+                description="按档位粒度折算并四舍五入到最近档：差值 50 V 以内向下、50 V 及以上向上；副边↔副边不参与"
+              />
               <CardBody>
                 <Grid minItemWidth={130} gap={4}>
                   <Field label="启用">{flag('voltage_step_enabled')}</Field>
-                  <Field label="每档电压 V">{num('voltage_step_v')}</Field>
-                  <Field label="每档增加 mm">{num('voltage_step_mm')}</Field>
+                  <Field label="档位粒度 V" hint="默认 100 V 一档，不足一档向上取一档">
+                    {num('voltage_step_granularity_v')}
+                  </Field>
+                  <Field label="基准电压 V" hint="与基准增加 mm 一起折算">
+                    {num('voltage_step_v')}
+                  </Field>
+                  <Field label="基准增加 mm" hint="如 400 V 对应 1.3 mm">
+                    {num('voltage_step_mm')}
+                  </Field>
                 </Grid>
               </CardBody>
             </Card>
 
             <Card>
-              <CardHeader title="板边与器件本体" />
+              <CardHeader title="板边 / 器件 / 安装孔" description="与电气规则取更严格者" />
               <CardBody>
                 <Grid minItemWidth={140} gap={4}>
                   <Field label="板边间距启用">{flag('board_edge_enabled')}</Field>
@@ -266,6 +253,18 @@ export default function RulesPage({ setStatus, setStatusError, active, revision 
                   <Field label="本体间距启用">{flag('body_gap_enabled')}</Field>
                   <Field label="本体间距 mm" hint="3D 本体投影，正反面不判干涉">
                     {num('body_gap_mm')}
+                  </Field>
+                  <Field label="安装孔间距启用" hint="器件焊盘铜箔外沿到安装孔">
+                    {flag('pad_mount_gap_enabled')}
+                  </Field>
+                  <Field label="安装孔间距 mm" hint="已指派电位的安装孔，机械装配最小距离">
+                    {num('pad_mount_gap_mm')}
+                  </Field>
+                  <Field label="同网络间距启用" hint="同一网络的焊盘之间">
+                    {flag('same_net_gap_enabled')}
+                  </Field>
+                  <Field label="同网络间距 mm" hint="允许比器件间 0.3 更小；不同网络仍按 0.3">
+                    {num('same_net_gap_mm')}
                   </Field>
                 </Grid>
               </CardBody>
@@ -298,11 +297,11 @@ export default function RulesPage({ setStatus, setStatusError, active, revision 
                         className="metric"
                         data-tone={lastCheck.components.errors > 0 ? 'danger' : 'ok'}
                       >
-                        <span className="metric__label">ERROR</span>
+                        <span className="metric__label">器件级 ERROR</span>
                         <span className="metric__value">{lastCheck.components.errors}</span>
                       </div>
                       <div className="metric" data-tone="warn">
-                        <span className="metric__label">WARNING</span>
+                        <span className="metric__label">器件级 WARNING</span>
                         <span className="metric__value">{lastCheck.components.warnings}</span>
                       </div>
                       <div className="metric">

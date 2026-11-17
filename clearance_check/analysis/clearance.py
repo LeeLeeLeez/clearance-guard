@@ -197,6 +197,41 @@ def _candidate_pairs(items: list[ClearanceItem], radius: float) -> set[tuple[int
     return pairs
 
 
+def _creepage_slots(board) -> list[SlotRect]:
+    """收集参与爬电判定的避距槽（多边形/槽）。
+
+    - 角色兼容历史写法 ``slot`` 与规范值 ``creepage``；
+    - 圆孔不是爬电槽；
+    - 覆盖整板 90% 以上的挖空是板框本身，必须排除：否则任意两点都会
+      在整板矩形上算出一段虚假的“绕槽沿面”，把本该 6 mm 的电气间隙
+      误判成不足 8 mm 的爬电。
+    """
+    outline = list(getattr(board, "outline", None) or [])
+    board_w = board_h = 0.0
+    if len(outline) >= 3:
+        xs = [p[0] for p in outline]
+        ys = [p[1] for p in outline]
+        board_w = max(xs) - min(xs)
+        board_h = max(ys) - min(ys)
+
+    slots: list[SlotRect] = []
+    for cutout in getattr(board, "cutouts", None) or []:
+        if getattr(cutout, "is_circle", True):
+            continue
+        role = str(getattr(cutout, "role", "") or "").strip().lower()
+        if role in ("frame", "footprint", "ignore"):
+            continue  # 板框 / 封装挖空 / 明确忽略
+        if role and role not in ("creepage", "slot"):
+            continue
+        # role 为空：旧快照/手工构造未打标签，沿用历史行为按避距槽处理
+        x1, y1, x2, y2 = cutout.bbox
+        if board_w > 0 and board_h > 0:
+            if abs(x2 - x1) >= 0.9 * board_w and abs(y2 - y1) >= 0.9 * board_h:
+                continue  # 板框本身
+        slots.append(SlotRect(x1, y1, x2, y2))
+    return slots
+
+
 def find_violations(
     board: Board,
     classifications: dict[str, NetClassification],
@@ -251,25 +286,30 @@ def find_violations(
             voltage_max=part.voltage_max if part.voltage_max is not None else part.voltage,
         )
 
-    slots: list[SlotRect] = []
-    for cutout in getattr(board, "cutouts", []) or []:
-        if getattr(cutout, "is_circle", True):
-            continue
-        role = getattr(cutout, "role", "") or "creepage"
-        if role != "creepage":
-            continue  # 板框外形 / 器件封装挖空不参与爬电判定
-        x1, y1, x2, y2 = cutout.bbox
-        slots.append(SlotRect(x1, y1, x2, y2))
+    slots = _creepage_slots(board)
 
     max_gap = max(
         [
             rules.isolation_gap_mm,
             rules.component_gap_mm if rules.component_gap_enabled else 0.0,
-            *[float(v) for v in rules.matrix.values()],
+            rules.pad_mount_gap_mm if rules.pad_mount_gap_enabled else 0.0,
+            rules.same_net_gap_mm if rules.same_net_gap_enabled else 0.0,
+            *([float(v) for v in rules.matrix.values()] if rules.matrix_enabled else []),
             0.5,
         ]
     )
-    if rules.voltage_step_enabled and rules.voltage_step_mm > 0:
+    if rules.voltage_step_enabled and rules.voltage_step_v > 0:
+        # 用板上实际最大电压差估算上限（这里用 ceil 作为安全上界，避免剪枝漏检）
+        gran = rules.voltage_step_granularity_v
+        if gran <= 0 or gran > rules.voltage_step_v:
+            gran = rules.voltage_step_v
+        volts = [item.peak_voltage() for item in merged.values()]
+        if len(volts) >= 2:
+            span = max(volts) - min(volts)
+            extra = math.ceil(span / gran - 1e-9) * gran * (
+                rules.voltage_step_mm / rules.voltage_step_v
+            )
+            max_gap = max(max_gap, extra)
         max_gap = max(max_gap, rules.voltage_step_mm * 4)
 
     def net_class(net: str) -> NetClass:
@@ -286,10 +326,10 @@ def find_violations(
         if a.layers and b.layers and not (a.layers & b.layers):
             continue  # 不同层不构成间距问题
         same_component = bool(a.component) and a.component == b.component
-        same_net = a.net == b.net
+        same_net = bool(a.net) and a.net == b.net
         # 不同器件之间始终按「器件间最小间距」检查（与网络无关）
         floor_applies = rules.component_gap_enabled and not same_component
-        if same_net and not floor_applies:
+        if same_net and not rules.same_net_gap_enabled and not floor_applies:
             continue
         class_a, class_b = net_class(a.net), net_class(b.net)
         if not rules.check_unknown and NetClass.UNKNOWN in (class_a, class_b):
@@ -304,9 +344,23 @@ def find_violations(
         required, rule_name = rules.required(
             class_a, class_b, net_voltage(a.net), net_voltage(b.net)
         )
-        if floor_applies and rules.component_gap_mm > required + 1e-9:
-            required = rules.component_gap_mm
-            rule_name = f"器件间最小间距 {rules.component_gap_mm:g} mm（与网络无关）"
+        if same_net and rules.same_net_gap_enabled:
+            # 同一网络的焊盘允许比器件间 0.3 更小，统一按同网络间距判
+            required = rules.same_net_gap_mm
+            rule_name = f"同网络焊盘间距 {rules.same_net_gap_mm:g} mm"
+            if ({a.kind, b.kind} == {"pad", "mount"} and rules.pad_mount_gap_enabled
+                    and rules.pad_mount_gap_mm > required + 1e-9):
+                required = rules.pad_mount_gap_mm
+                rule_name = f"焊盘距安装孔 {rules.pad_mount_gap_mm:g} mm"
+        else:
+            if floor_applies and rules.component_gap_mm > required + 1e-9:
+                required = rules.component_gap_mm
+                rule_name = f"器件间最小间距 {rules.component_gap_mm:g} mm（与网络无关）"
+            # 器件焊盘 ↔ 安装孔：机械装配最小间距，与电气类别无关，取更严格者
+            if ({a.kind, b.kind} == {"pad", "mount"} and rules.pad_mount_gap_enabled
+                    and rules.pad_mount_gap_mm > required + 1e-9):
+                required = rules.pad_mount_gap_mm
+                rule_name = f"焊盘距安装孔 {rules.pad_mount_gap_mm:g} mm"
         if bbox_gap(a.bbox, b.bbox) > required:
             continue
 

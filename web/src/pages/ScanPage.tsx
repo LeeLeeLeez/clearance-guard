@@ -235,6 +235,8 @@ function NetsPanel({ setStatus, setStatusError, active, revision }: PageProps) {
   const [sheet, setSheet] = useState('common')
   const [side, setSide] = useState<'power' | 'control'>('power')
   const [busy, setBusy] = useState(false)
+  // 网络名搜索：按图纸 / 全表 两个视图共用，切换图纸时保留关键字
+  const [search, setSearch] = useState('')
 
   const load = useCallback(async () => {
     try {
@@ -270,6 +272,12 @@ function NetsPanel({ setStatus, setStatusError, active, revision }: PageProps) {
     if (view !== 'sheet' || sheet !== 'common') return rows
     return rows.filter((n) => (n.sheet_side || 'control') === side)
   }, [rows, view, sheet, side])
+
+  const shownFiltered = useMemo(() => {
+    const keyword = search.trim().toLowerCase()
+    if (!keyword) return shown
+    return shown.filter((n) => (n.net || '').toLowerCase().includes(keyword))
+  }, [shown, search])
 
   const patchNet = async (name: string, patch: Record<string, unknown>) => {
     try {
@@ -563,15 +571,44 @@ function NetsPanel({ setStatus, setStatusError, active, revision }: PageProps) {
           </>
         )}
 
+        <div
+          style={{
+            display: 'flex',
+            gap: 8,
+            alignItems: 'center',
+            flexWrap: 'wrap',
+            marginBottom: 8,
+          }}
+        >
+          <div style={{ width: 260 }}>
+            <Input
+              size="sm"
+              value={search}
+              placeholder="搜索网络名，如 VIN、GND、Vgs"
+              onChange={setSearch}
+            />
+          </div>
+          <Text variant="caption" tone="subtle">
+            筛选后 {shownFiltered.length} / {shown.length} 个网络
+          </Text>
+          {search ? (
+            <Button size="sm" variant="ghost" onClick={() => setSearch('')}>
+              清除搜索
+            </Button>
+          ) : null}
+        </div>
+
         <Table
           className="cg-table"
           label="网络电压分类"
           columns={columns}
-          data={shown}
+          data={shownFiltered}
           rowKey="net"
           scroll
           maxHeight="min(58vh, 780px)"
-          empty={<span className="hint">没有网络</span>}
+          empty={
+            <span className="hint">{search ? '没有匹配的网络' : '没有网络'}</span>
+          }
         />
       </CardBody>
     </Card>
@@ -619,7 +656,17 @@ function MountsPanel({ setStatus, setStatusError, active, revision }: PageProps)
     },
     { key: 'hole', header: '孔径', width: 76, align: 'end', render: (r) => r.hole.toFixed(2) },
     { key: 'width', header: '外径', width: 76, align: 'end', render: (r) => r.width.toFixed(2) },
-    { key: 'net', header: '原网络', width: '14%', hideBelow: 'md', render: (r) => r.net || '—' },
+    {
+      key: 'net',
+      header: '指派网络',
+      width: '14%',
+      hideBelow: 'md',
+      render: (r) => (
+        <span className="cg-mono" style={{ color: r.net ? undefined : 'var(--ok-danger)' }}>
+          {r.net || '未指派'}
+        </span>
+      ),
+    },
     {
       key: 'net_class',
       header: '电位归属',
@@ -667,7 +714,10 @@ function MountsPanel({ setStatus, setStatusError, active, revision }: PageProps)
 
   return (
     <Card>
-      <CardHeader title="安装焊盘" description={`${data.mounts.length} 个候选（孔径只用于识别，避距按外径算）`} />
+      <CardHeader
+        title="安装焊盘"
+        description={`${data.mounts.length} 个候选，默认指派 SGND（孔径只用于识别，避距按外径算）；未指派的在「重新校验」时会报错`}
+      />
       <CardBody>
         <Table
           className="cg-table"

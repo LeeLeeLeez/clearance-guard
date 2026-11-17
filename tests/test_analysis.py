@@ -120,15 +120,25 @@ def test_assigned_mount_point_participates_in_clearance(demo):
     assert any(mount.name in (v.item_a, v.item_b) for v in violations)
 
 
-def test_unassigned_mount_point_ignored(demo):
-    board, pins, result = demo
-    mount = board.mounts[0]
-    pad = next(p for p in board.pads if p.net == "HV_DC_375V")
-    mount.x, mount.y = pad.x, pad.y
-    mount.net_class = NetClass.UNKNOWN
+def test_unassigned_mount_point_detected():
+    """未指派网络的安装孔要能被校验入口识别并报错，不再静默忽略。"""
+    from api.result_service import unassigned_mounts
+    from clearance_check.model import MountPoint
 
-    violations = find_violations(board, result, ClearanceRules(), mounts=board.mounts)
-    assert not any(mount.name in (v.item_a, v.item_b) for v in violations)
+    # 默认就是 SGND，算已指派
+    assert unassigned_mounts([MountPoint(name="MH1")]) == []
+    # net 为空 → 未指派
+    assert unassigned_mounts([MountPoint(name="MH2", net="")]) == ["MH2"]
+    # 电位仍是「未定」→ 未指派
+    assert unassigned_mounts([MountPoint(name="MH3", net_class=NetClass.UNKNOWN)]) == ["MH3"]
+    # 停用的孔不参与校验，不报错
+    assert unassigned_mounts([MountPoint(name="MH4", net="", enabled=False)]) == []
+
+
+def test_demo_mount_defaults_to_sgnd(demo):
+    board, _pins, _result = demo
+    assert board.mounts
+    assert all(m.net == "SGND" for m in board.mounts)
 
 
 def test_voltage_difference_rule_raises_gap():
@@ -138,8 +148,33 @@ def test_voltage_difference_rule_raises_gap():
     gap, rule = rules.required(
         NetClass.PRIMARY_SWITCHING, NetClass.PRIMARY_CONST, 375.0, 0.0
     )
-    assert gap == pytest.approx(1.5)
+    # 100 V 一档，375 V 不足一档按 4 档算 → 2.0 mm
+    assert gap == pytest.approx(2.0)
     assert "电压差" in rule
+
+
+def test_voltage_difference_uses_100v_granularity_and_interpolates():
+    rules = ClearanceRules(
+        voltage_step_v=400.0, voltage_step_mm=1.3, voltage_step_granularity_v=100.0
+    )
+    gap, _ = rules.required(
+        NetClass.PRIMARY_SWITCHING, NetClass.PRIMARY_CONST, 400.0, 0.0
+    )
+    assert gap == pytest.approx(1.3)
+
+    # 1099 V → 11 档 × 0.325 mm = 3.575 mm，不再是 800 V 档的 2.6 mm
+    gap, rule = rules.required(
+        NetClass.PRIMARY_SWITCHING, NetClass.PRIMARY_CONST, 1099.0, 0.0
+    )
+    assert gap == pytest.approx(3.575)
+    assert "100 V 一档" in rule
+
+    # 按最近档位四舍五入：<50 V 向下、>=50 V 向上
+    for delta, expected in ((418.0, 1.3), (449.0, 1.3), (450.0, 1.625)):
+        gap, _ = rules.required(
+            NetClass.PRIMARY_SWITCHING, NetClass.PRIMARY_CONST, delta, 0.0
+        )
+        assert gap == pytest.approx(expected), (delta, gap)
 
 
 def test_rules_roundtrip(tmp_path):

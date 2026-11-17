@@ -448,6 +448,40 @@ class EdaAgentSession:
             return [c for c in (payload.get("components") or []) if isinstance(c, dict)]
         return [c for c in (payload or []) if isinstance(c, dict)]
 
+    def components_in_rect(self, rect, margin: float = 5.0) -> list[dict[str, Any]]:
+        """按 X/Y 范围只取框内器件（obj_query 数值过滤；返回位号/坐标/旋转/层）。"""
+        x1, y1, x2, y2 = rect
+        m = margin
+        flt = "|".join([
+            f"X>={(x1 - m) / MIL_TO_MM:.3f}",
+            f"X<={(x2 + m) / MIL_TO_MM:.3f}",
+            f"Y>={(y1 - m) / MIL_TO_MM:.3f}",
+            f"Y<={(y2 + m) / MIL_TO_MM:.3f}",
+        ])
+        payload = self._call(
+            "obj_query",
+            {
+                "object_type": "eComponentObject",
+                "properties": "Designator,X,Y,Rotation,Layer",
+                "scope": "active_doc",
+                "filter": flt,
+                "limit": 0,
+            },
+            timeout=180,
+        )
+        if not isinstance(payload, dict) or "objects" not in payload:
+            raise EdaAgentError("obj_query 未返回 objects")
+        return [o for o in (payload.get("objects") or []) if isinstance(o, dict)]
+
+    def export_coordinates(self) -> list[dict[str, Any]]:
+        """读取全部器件的位号/坐标/旋转/层（不含 3D 本体，比 pcb_get_components 快）。"""
+        payload = self._call("pcb_export_coordinates", {}, timeout=120)
+        if isinstance(payload, dict):
+            rows = payload.get("placements") or []
+        else:
+            rows = payload or []
+        return [r for r in rows if isinstance(r, dict)]
+
     def component_pads(self, designators: Iterable[str], chunk: int = 60) -> dict[str, list[dict[str, Any]]]:
         """批量读取多个器件的焊盘（一次 IPC 往返）。"""
         names = [d for d in designators if d]
@@ -1106,6 +1140,158 @@ class EdaAgentSession:
         return board, report
 
 
+def _fix_body_offset_outliers(board, assigned, body_list) -> int:
+    """纠正「正反面镜像、几乎重叠」器件的 3D 本体对调。
+
+    同一（封装、层、旋转、尺寸）的重复器件，其本体相对器件中心的偏移应当一致。
+    正反面镜像件在 XY 上只差零点几毫米，IoU / 尺寸分几乎打平，全局贪心容易把
+    两颗的镜像本体对调 —— 于是同一个封装有的通道报本体违规、有的不报。
+
+    这里只做「成对交换」：
+      1) 按组统计最常见的本体偏移作为共识；
+      2) 只对「正反面几乎重叠 + 本体尺寸相同」的器件对检查；
+      3) 仅当交换后两者都更贴近各自组的共识时才交换。
+    这样不会动到孤立器件，也不会改掉本来就偏心的封装。
+    """
+    from collections import Counter
+
+    def _center(box):
+        return ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
+
+    def _area(box):
+        return max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1])
+
+    def _dist(p, q):
+        return ((p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2) ** 0.5
+
+    def _side(comp) -> str:
+        layer = str(getattr(comp, "layer", "") or "TOP").upper()
+        return "BOTTOM" if "BOTTOM" in layer else "TOP"
+
+    def _key(designator):
+        comp = board.components.get(designator)
+        if comp is None:
+            return None
+        bbox = getattr(comp, "bbox", None) or ()
+        return (
+            str(getattr(comp, "footprint", "") or ""),
+            str(getattr(comp, "layer", "") or "").upper(),
+            round(float(getattr(comp, "rotation", 0.0) or 0.0)) % 360,
+            round(bbox[2] - bbox[0], 1) if len(bbox) == 4 else 0.0,
+            round(bbox[3] - bbox[1], 1) if len(bbox) == 4 else 0.0,
+        )
+
+    # 每组最常见的本体偏移（比中位数更抗离群：多数通道正确时不会被少数对调带偏）
+    groups: dict[tuple, list[str]] = {}
+    for designator in assigned:
+        key = _key(designator)
+        if key is not None:
+            groups.setdefault(key, []).append(designator)
+
+    consensus: dict[tuple, tuple[float, float]] = {}
+    for key, members in groups.items():
+        offsets = []
+        for d in members:
+            comp = board.components[d]
+            cx, cy = _center(assigned[d][1])
+            offsets.append((round(cx - comp.x, 2), round(cy - comp.y, 2)))
+        if offsets:
+            consensus[key] = Counter(offsets).most_common(1)[0][0]
+
+    def _err(box, designator, key) -> float:
+        comp = board.components[designator]
+        mx, my = consensus[key]
+        cx, cy = _center(box)
+        return abs(cx - comp.x - mx) + abs(cy - comp.y - my)
+
+    items = [(d, board.components[d]) for d in assigned if board.components.get(d)]
+    fixed = 0
+    for i, (da, ca) in enumerate(items):
+        for db, cb in items[i + 1:]:
+            if _side(ca) == _side(cb):
+                continue
+            if _dist((ca.x, ca.y), (cb.x, cb.y)) > 0.6:
+                continue  # 只处理正反面几乎重叠的镜像件
+            ba, bb = assigned[da][1], assigned[db][1]
+            if not ba or not bb:
+                continue
+            if abs(_area(ba) - _area(bb)) > 0.2 * max(_area(ba), _area(bb)):
+                continue  # 尺寸差太多，不是同一封装的镜像件
+            ka, kb = _key(da), _key(db)
+            if ka not in consensus or kb not in consensus:
+                continue
+            now = _err(ba, da, ka) + _err(bb, db, kb)
+            swapped = _err(bb, da, ka) + _err(ba, db, kb)
+            # 只有「显著改善」才交换，避免把 0.05 mm 级别的正常偏心也当成错配
+            if swapped + 0.30 < now:
+                assigned[da], assigned[db] = assigned[db], assigned[da]
+                fixed += 1
+    return fixed
+
+
+def _share_symmetric_bodies(board, assigned) -> int:
+    """正反面镜像件共用同一个 3D 本体框。
+
+    对称封装（如 WSON）的 top / bottom 两颗器件 3D 本体投影可能完全相同，
+    ``attach_bodies`` 去重后只剩一个框，只能分给其中一颗；另一颗因缺本体
+    退回占位框参与本体间距判定，结果会明显偏小（实测 U12 与 C124）。
+    这里把「本体中心几乎正落在另一颗镜像件中心上」的框共享过去。
+
+    只对同位置（<0.6 mm）、异面、且本体尺寸与器件外框匹配的镜像件生效。
+    """
+    def _center(box):
+        return ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
+
+    def _area(box):
+        return max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1])
+
+    def _dist(p, q):
+        return ((p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2) ** 0.5
+
+    def _side(comp) -> str:
+        layer = str(getattr(comp, "layer", "") or "TOP").upper()
+        return "BOTTOM" if "BOTTOM" in layer else "TOP"
+
+    comps = list(board.components.items())
+    added = 0
+    for da, ca in comps:
+        item = assigned.get(da)
+        if not item:
+            continue
+        box = item[1]
+        if not box:
+            continue
+        body_center = _center(box)
+        for db, cb in comps:
+            if db == da or db in assigned:
+                continue
+            if _side(ca) == _side(cb):
+                continue
+            if str(getattr(ca, "footprint", "")) != str(getattr(cb, "footprint", "")):
+                continue
+            if _dist((ca.x, ca.y), (cb.x, cb.y)) > 0.6:
+                continue
+            if _dist(body_center, (cb.x, cb.y)) > 0.15:
+                continue
+            bbox = getattr(cb, "bbox", None)
+            if bbox:
+                if _area(box) > 6.0 * max(
+                    (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]), 1e-6
+                ):
+                    continue
+                tol = 0.5
+                if not (
+                    box[0] >= bbox[0] - tol
+                    and box[1] >= bbox[1] - tol
+                    and box[2] <= bbox[2] + tol
+                    and box[3] <= bbox[3] + tol
+                ):
+                    continue
+            assigned[db] = (0.0, box)
+            added += 1
+    return added
+
+
 def attach_bodies(board, bodies: list[dict]) -> int:
     """把 3D 本体外框归到所属器件（按几何做全局匹配）。
 
@@ -1287,6 +1473,9 @@ def attach_bodies(board, bodies: list[dict]) -> int:
                     improved = True
         if not improved:
             break
+
+    _fix_body_offset_outliers(board, assigned, body_list)
+    _share_symmetric_bodies(board, assigned)
 
     for designator, (_score, box) in assigned.items():
         board.components[designator].body_bbox = box
